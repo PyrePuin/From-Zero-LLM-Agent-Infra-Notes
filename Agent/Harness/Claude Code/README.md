@@ -39,7 +39,7 @@ flowchart TD
 | Phase 3 | s09 - s11 | 长期记忆与系统提示 | 怎么跨会话连续？ | done |
 | Phase 4 | s12 - s14 | 任务编排 | 怎么跑后台/定时任务？ | todo |
 | Phase 5 | s15 - s18 | 多智能体 | 怎么让多个 Agent 协作？ | todo |
-| Phase 6 | s07, s19, s20 | 生态与整合 | 怎么接入外部世界？ | todo |
+| Phase 6 | s07, s19, s20 | 生态与整合 | 怎么接入外部世界？ | s07 done / s19 s20 todo |
 
 ## 阅读顺序
 

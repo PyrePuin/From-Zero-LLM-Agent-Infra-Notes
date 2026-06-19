@@ -27,6 +27,8 @@ Agent/
         09 - Memory.md
         10 - System Prompt.md
         11 - Error Recovery.md
+      Phase 6 - 扩展与组装/
+        07 - Skill Loading.md     ← s19/s20 暂未完成
       对话精华 QA/
         对话精华.md
 ```
