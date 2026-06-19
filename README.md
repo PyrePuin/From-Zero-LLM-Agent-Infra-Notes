@@ -22,6 +22,11 @@ Agent/
         05 - TodoWrite.md
         06 - Subagent.md
         08 - Context Compact.md
+      Phase 3 - 记忆与恢复/
+        00 - 综合总结.md
+        09 - Memory.md
+        10 - System Prompt.md
+        11 - Error Recovery.md
       对话精华 QA/
         对话精华.md
 ```
