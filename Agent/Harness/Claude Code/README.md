@@ -6,18 +6,19 @@
 
 一个 LLM Agent 长成什么样，主要由四个接口决定：
 
-```
-                  ┌─────────────────────┐
-                  │   Agent Loop (s01)  │  ← 循环骨架
-                  │   while + dispatch  │
-                  └──────────┬──────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        │                    │                    │
-   ┌────┴─────┐         ┌────┴─────┐         ┌────┴─────┐
-   │  Tools   │         │  Hooks   │         │ Messages │
-   │  (s02)   │         │  (s04)   │         │  list    │
-   └──────────┘         └──────────┘         └──────────┘
+```mermaid
+flowchart TD
+    Loop["<b>Agent Loop (s01)</b><br/>while + dispatch<br/><i>循环骨架</i>"]
+    Tools["<b>Tools (s02)</b><br/>名字 + schema + handler"]
+    Hooks["<b>Hooks (s04)</b><br/>UserPromptSubmit / PreToolUse<br/>PostToolUse / Stop"]
+    Messages["<b>Messages list</b><br/>会话状态真相来源"]
+    Loop -->|派发| Tools
+    Loop -->|触发| Hooks
+    Loop -->|读写| Messages
+    style Loop fill:#fde68a,stroke:#b45309,stroke-width:2px
+    style Tools fill:#dbeafe,stroke:#1e40af
+    style Hooks fill:#dbeafe,stroke:#1e40af
+    style Messages fill:#dbeafe,stroke:#1e40af
 ```
 
 **所有后续扩展（Phase 2 - 6）都是往这四个接口上挂东西**：

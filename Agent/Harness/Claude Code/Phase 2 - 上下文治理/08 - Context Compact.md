@@ -33,6 +33,33 @@ tags:
 
 加上一个**反应式兜底**：API 返回 `prompt_too_long` 错误时，立即强制触发 L4。
 
+```mermaid
+flowchart TD
+    Start(["每轮循环开头"])
+    L3["<b>L3 tool_result_budget</b><br/>单条 > 200K 字符 → 落盘<br/><i>成本: 一次磁盘 IO</i>"]
+    L1["<b>L1 snip_compact</b><br/>messages > 50 条 → 砍中间<br/><i>成本: 几乎零</i>"]
+    L2["<b>L2 micro_compact</b><br/>旧 tool_result → 占位符<br/><i>成本: 几乎零</i>"]
+    Check{总 token<br/>逼近上限?}
+    L4["<b>L4 compact_history</b><br/>LLM 总结整段历史<br/><i>成本: 一次完整 API 调用</i>"]
+    Call["调 API"]
+    Err{API 报<br/>prompt_too_long?}
+    React["<b>reactive_compact</b><br/>强制 L4 + 重试<br/><i>反应式兜底</i>"]
+    Done(["继续循环"])
+
+    Start --> L3 --> L1 --> L2 --> Check
+    Check -->|是| L4 --> Call
+    Check -->|否| Call
+    Call --> Err
+    Err -->|是| React --> Call
+    Err -->|否| Done
+
+    style L1 fill:#d1fae5,stroke:#047857
+    style L2 fill:#d1fae5,stroke:#047857
+    style L3 fill:#fef3c7,stroke:#b45309
+    style L4 fill:#fecaca,stroke:#991b1b
+    style React fill:#fecaca,stroke:#991b1b
+```
+
 ## 为什么是分层而不是一刀切
 
 最直观的做法是：上下文快满了 → 调 LLM 总结历史 → 用总结替换历史。

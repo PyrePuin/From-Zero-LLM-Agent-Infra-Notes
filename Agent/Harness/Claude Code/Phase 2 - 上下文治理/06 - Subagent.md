@@ -63,6 +63,27 @@ Agent 里的 Subagent 完全对应：
 - **隔离**：子 Agent 的 messages 完全独立，不引用主 Agent 的历史。
 - **Join**：子 Agent 跑完，只把最后一段文字返回。主 Agent 把这段文字当 tool_result 接收。
 
+```mermaid
+sequenceDiagram
+    participant M as 主 Agent
+    participant S as 子 Agent
+    participant T as 工具（bash/read/...）
+
+    M->>M: messages = [...已有历史...]
+    M->>S: task(description="查找支付相关代码")
+    Note over S: fork: 全新 messages = [description]
+
+    loop 自己的循环（最多 30 轮）
+        S->>T: 调用工具（也过 PreToolUse hook）
+        T-->>S: tool_result
+    end
+
+    S-->>M: 只返回总结文字<br/>"支付在 payment.py 的 charge() 和 refund()"
+    Note over S: join: 子 messages 被丢弃
+    M->>M: 总结作为 tool_result 进入主 messages
+    Note over M: 主上下文只长了"总结长度"
+```
+
 ### "无递归"约束
 
 注意 SUB_TOOLS 里**没有 task 工具**。这是故意的：

@@ -63,29 +63,28 @@ s01 - s03 的循环已经开始变臃肿：派发 + 权限 + 日志 + 各种 if�
 
 ### 四个事件的语义
 
-```
-用户输入 ──→ [UserPromptSubmit] ──→ 进入循环
-                                   │
-                                   ↓
-                              调 API
-                                   │
-                                   ↓
-                          ┌─── for each block:
-                          │     [PreToolUse] (可短路)
-                          │         ↓
-                          │     执行 handler
-                          │         ↓
-                          │     [PostToolUse]
-                          └─────────┘
-                                   │
-                                   ↓
-                          stop_reason != tool_use
-                                   │
-                                   ↓
-                              [Stop] (可强制再进循环)
-                                   │
-                                   ↓
-                                 返回
+```mermaid
+flowchart TD
+    U([用户输入]) --> H1["<b>UserPromptSubmit</b><br/>注入工作目录 / 改写 prompt<br/><i>不能短路</i>"]
+    H1 --> Loop["调 API → 模型回复"]
+    Loop --> Iter{每条 tool_use block}
+    Iter --> H2["<b>PreToolUse</b><br/>权限检查 / 日志 / 限流<br/><i>返回非 None 即短路</i>"]
+    H2 --> Decision{短路?}
+    Decision -->|是| Skip["跳过执行<br/>返回拒绝字符串"]
+    Decision -->|否| Exec["执行 handler"]
+    Exec --> H3["<b>PostToolUse</b><br/>截断大输出 / 统计耗时<br/><i>不能短路</i>"]
+    Skip --> Next{还有 block?}
+    H3 --> Next
+    Next -->|是| Iter
+    Next -->|否| Check{stop_reason<br/>== tool_use?}
+    Check -->|是| Loop
+    Check -->|否| H4["<b>Stop</b><br/>会话总结 / 自动续跑<br/><i>返回非 None 强制再进循环</i>"]
+    H4 --> End([返回])
+
+    style H1 fill:#dbeafe,stroke:#1e40af
+    style H2 fill:#fde68a,stroke:#b45309
+    style H3 fill:#dbeafe,stroke:#1e40af
+    style H4 fill:#fde68a,stroke:#b45309
 ```
 
 每个事件的典型用途：
