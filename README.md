@@ -39,7 +39,8 @@ Agent/
         17 - Autonomous Agents.md
         18 - Worktree Isolation.md
       Phase 6 - 扩展与组装/
-        07 - Skill Loading.md     ← s19/s20 暂未完成
+        07 - Skill Loading.md
+        19 - MCP Plugin.md        ← s20 暂未完成
       对话精华 QA/
         对话精华.md
 ```
