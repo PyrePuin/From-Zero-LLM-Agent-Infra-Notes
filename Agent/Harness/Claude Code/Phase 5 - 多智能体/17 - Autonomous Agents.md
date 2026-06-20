@@ -297,42 +297,138 @@ def scan_unclaimed_tasks():
 
 ## 原本的 Claude Code 怎么做的
 
-CC 的自治机制是**四个独立机制的组合**，s17 用一个 `idle_poll` 简化演示。
+### 核心差异：1 个函数 vs 4 个机制
 
-### 1. idle_notification（事件通知）
+s17 教学版用**一个 `idle_poll()`** 干所有事——既轮询 inbox，又扫任务板，又处理 shutdown。
 
-CC 的 Teammate 完成一轮工作后，**主动**向 Lead 发 `idle_notification` 消息（`inProcessRunner.ts:569-589`）——"我闲了，有事吗？"。Lead 收到后决定：分配新任务 / 请求关机 / 不理。
+CC 拆成**4 个独立机制**，各干各的，组合起来达到同样效果但更灵敏、更省 CPU：
 
-s17 的 idle_poll 是**Teammate 自己决定**（拉模式），CC 是**通知 Lead 决定**（推模式 + Lead 拉模式）。
+```
+教学版:    idle_poll() = 一个函数包打全部
 
-### 2. mailbox 轮询（500ms）
+CC:        idle_notification  +  mailbox 轮询  +  task watcher  +  tryClaimNextTask
+            （通知 Lead）       （看消息）       （看任务）         （认领）
+```
 
-CC 的 `waitForNextPromptOrShutdown()`（`inProcessRunner.ts:689-868`）是个 **500ms 轮询循环**——比 s17 的 5s 更激进。检查三类来源：
+### 四个机制分别做什么
+
+#### 机制 1：idle_notification（通知 Lead）
+
+CC 的 Teammate 完成一轮工作后，**主动发条消息给 Lead**："我闲了"（`inProcessRunner.ts:569-589`）。
+
+```
+alice 干完 task_1
+  ↓
+alice → BUS.send("lead", idle_notification)
+  ↓
+Lead LLM 看到："alice 闲了，要不要派新活？"
+```
+
+**用处**：让 Lead 知道谁可用。Lead 可以决定"派新任务 / 请求关机 / 不理"。
+
+**为什么需要**：Lead 不能直接看到每个 Teammate 的状态——它只看自己的 inbox。Teammate 主动汇报，Lead 才能协调。
+
+s17 的 idle_poll 是 **Teammate 自己决定**（拉模式），CC 是 **通知 Lead 决定**（推模式 + Lead 拉模式）。
+
+#### 机制 2：mailbox 轮询（500ms）
+
+CC 的 `waitForNextPromptOrShutdown()`（`inProcessRunner.ts:689-868`）是个 **500ms 轮询循环**——比 s17 的 5s 快 10 倍。检查三类来源：
 
 - pending user messages
 - mailbox 文件
 - task list
 
-shutdown_request 被优先处理（L768-804）。
+shutdown_request 被优先处理（L768-804）——**协议消息不被普通消息饿死**。
 
-s17 用 5s 是为了演示清晰（少打日志），生产用 500ms 更灵敏。
+**为什么 500ms 而不是事件驱动**：mailbox 是文件，跨进程文件事件通知（inotify / fs.watch）在不同 OS 行为不一致。**轮询是最可靠的兜底**。s17 用 5s 是为了演示清晰（少打日志）。
 
-### 3. task watcher（事件驱动）
+#### 机制 3：task watcher（事件驱动）
 
-CC 用 `useTaskListWatcher`（`hooks/useTaskListWatcher.ts:34-189`）——基于 `fs.watch()` 监听 `.claude/tasks/` 目录变化，**1 秒 debounce**，新任务创建或依赖解锁时自动触发检查。
+CC 用 `useTaskListWatcher`（`hooks/useTaskListWatcher.ts:34-189`）——基于 `fs.watch()` **监听 `.claude/tasks/` 目录变化**，**1 秒 debounce** 防抖，新任务创建或依赖解锁时立即触发检查。
 
-**这是 s17 完全没实现的部分**——s17 是纯轮询（5s 一次），CC 是事件驱动（文件变化立即响应）+ 轮询兜底。
+```
+Lead create_task("写测试") → 写 task_X.json
+  ↓
+fs.watch 触发事件 → task watcher 醒来
+  ↓
+task watcher: "有新任务！通知 Teammate 检查"
+```
 
-事件驱动的优势：低延迟、低 CPU。劣势：`fs.watch` 在不同 OS 行为不一致，需要 fallback。
+**对比教学版**：s17 的 `scan_unclaimed_tasks` 是**轮询**——5s 才发现一次。CC 是**事件**——任务一加就立即发现。
 
-### 4. tryClaimNextTask（主动认领）
+**类比**：
+- s17 = 每 5 秒看一次公告板
+- CC = 公告板有新内容就有人敲你门
 
-CC 的轮询循环内部也会调 `tryClaimNextTask()`（`inProcessRunner.ts:853-860`）——等待期间主动从 task list 领取任务。所以 CC 是**被动通知 + 主动认领**双保险。
+**这是 s17 完全没实现的部分**——s17 是纯轮询，CC 是事件驱动 + 轮询兜底。事件驱动优势：低延迟、低 CPU；劣势：`fs.watch` 在不同 OS 行为不一致，需要 fallback。
 
-### 5. 文件锁保证原子认领
+#### 机制 4：tryClaimNextTask（主动认领）
+
+CC 的 500ms 轮询循环内部也会调 `tryClaimNextTask()`（`inProcessRunner.ts:853-860`）——等待期间**主动从 task list 领取任务**。
+
+```
+while not shutdown:
+    sleep(0.5)
+    inbox = read_inbox()
+    if inbox: 处理
+    tryClaimNextTask()   # ← 顺便看一眼任务板
+```
+
+**为什么需要**：task watcher 是被动的——它通知"有新任务了"，但谁来认领？如果只靠 watcher 触发，多个 Teammate 同时醒来抢同一个任务。**轮询里加 tryClaim 是兜底**——保证每个 Teammate 都有机会主动认领。
+
+所以 CC 是 **被动通知 + 主动认领** 双保险。
+
+### 四个机制怎么配合（具体场景）
+
+**场景**：Lead 加了 task_X，alice 和 bob 都闲着。
+
+```
+时刻 T0      Lead create_task("task_X") → 写 .claude/tasks/task_X.json
+
+时刻 T0+10ms task watcher 的 fs.watch 触发（事件驱动，最快）
+             debounce 1 秒（避免连续写触发多次）
+
+时刻 T0+1s   debounce 结束，task watcher 检查任务列表
+             发现 task_X 是新的 + 可认领 → 广播"任务板变化"信号
+
+时刻 T0+1.5s alice 的 500ms 轮询醒来
+             ├─ inbox 空
+             └─ tryClaimNextTask() → scan → 发现 task_X → claim 成功！
+             → 进入 WORK 阶段做 task_X
+
+时刻 T0+2s   bob 的 500ms 轮询醒来
+             ├─ inbox 空
+             └─ tryClaimNextTask() → task_X 已是 alice 的 → 找不到可认领
+             → 继续等待
+
+时刻 T0+?    alice 干完 → 发 idle_notification 给 Lead
+             Lead 收到："alice 又闲了"
+```
+
+**关键点**：
+
+1. **task watcher** 负责快速感知任务变化（事件驱动，~1 秒延迟）
+2. **mailbox 轮询** 负责看消息 + 调 tryClaimNextTask（500ms 节奏）
+3. **tryClaimNextTask** 是真正的认领动作（在轮询循环里跑）
+4. **idle_notification** 在 alice 真的闲了时通知 Lead（让 Lead 决策）
+
+### 为什么拆 4 个而不是 1 个
+
+| 维度 | 教学版（1 个函数） | CC（4 个机制） |
+|---|---|---|
+| 任务发现延迟 | 5s（最坏） | ~1s（task watcher 事件） |
+| CPU 占用 | 5s 一次磁盘扫 | 500ms 一次轻量 inbox 读 + 事件驱动扫 |
+| 多 Teammate 协调 | 靠 owner 检查（不安全） | 靠文件锁（安全） |
+| Lead 感知 | 不主动通知 | idle_notification 主动通知 |
+| 实现复杂度 | 一个函数 ~30 行 | 四个模块，数百行 |
+
+**核心权衡**：教学版牺牲性能换简单（你看得懂），CC 用复杂度换性能和安全。
+
+### 文件锁保证原子认领
+
+CC 的 `claimTask()`（`utils/tasks.ts:541-612`）用 `proper-lockfile` 在锁内完成**读-检查-改-写**：
 
 ```typescript
-// CC: utils/tasks.ts:541-612
 async function claimTask(taskId, owner) {
   await lockfile.lock(taskPath)        // proper-lockfile
   try {
@@ -349,11 +445,11 @@ async function claimTask(taskId, owner) {
 }
 ```
 
-CC 用 `proper-lockfile` 在锁内完成**读-检查-改-写**，杜绝 TOCTOU。
+杜绝 TOCTOU（Time of Check to Time of Use）竞态。
 
 s17 教学版没锁——两个 Teammate 同时 scan 到同一个 task，第一个 claim 成功，第二个 `task.owner` 检查能拒绝（**部分防护**），但**两个同时跑到 save_task 之前的窗口**仍然存在。生产必须用文件锁。
 
-CC 还有 `claimTaskWithBusyCheck`（task-list 级别锁）——把"检查 owner 在不在 busy 状态"和"claim"做成原子操作。
+CC 还有 `claimTaskWithBusyCheck()`（`utils/tasks.ts:614-692`）——task-list 级别锁，把"检查 owner 在不在 busy 状态"和"claim"做成原子操作，避免 TOCTOU。
 
 ### 6. 无固定超时
 
