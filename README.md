@@ -27,6 +27,11 @@ Agent/
         09 - Memory.md
         10 - System Prompt.md
         11 - Error Recovery.md
+      Phase 4 - 长时间任务/
+        00 - 综合总结.md
+        12 - Task System.md
+        13 - Background Tasks.md
+        14 - Cron Scheduler.md
       Phase 6 - 扩展与组装/
         07 - Skill Loading.md     ← s19/s20 暂未完成
       对话精华 QA/
