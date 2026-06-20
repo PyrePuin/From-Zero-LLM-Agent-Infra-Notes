@@ -33,7 +33,8 @@ Agent/
         13 - Background Tasks.md
         14 - Cron Scheduler.md
       Phase 5 - 多智能体/
-        15 - Agent Teams.md       ← s16/s17/s18 暂未完成
+        15 - Agent Teams.md
+        16 - Team Protocols.md    ← s17/s18 暂未完成
       Phase 6 - 扩展与组装/
         07 - Skill Loading.md     ← s19/s20 暂未完成
       对话精华 QA/
