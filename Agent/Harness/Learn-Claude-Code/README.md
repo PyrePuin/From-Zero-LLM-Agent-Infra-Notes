@@ -2,12 +2,10 @@
 
 这一文件夹的笔记**只关注一个特定实现**：Anthropic 官方 CLI **Claude Code** 的开源复刻教程 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code)。每一个 phase 都按"原教程顺序"展开，逐课讲解**它每一课加的是什么、为什么加、这是什么机制、原本的 Claude Code 是怎么做的**。
 
-> [!info] 你在 `v2` 分支上
-> 本分支是 2026-06 重构版——**统一了 Phase 1-6 的笔记结构**（每篇 16 节固定骨架：重点关注 / 加了什么 / 演进与动机 / 核心抽象 / 架构图 / 代码骨架总览 / Q&A 等），更简洁、更易跨篇对比。**推荐阅读**。
+> [!info] 2026-06 重构版
+> Phase 1-6 的笔记结构已统一为 12 节固定骨架（重点关注 / 加了什么 / 演进与动机 / 核心抽象 / 架构图 / 代码骨架总览 / Q&A 等），更简洁、更易跨篇对比。
 >
-> 旧版（`main` 分支）保留作为对照，结构较松散、冗余较多。两分支内容覆盖一致，只是排版不同。
->
-> 切换：`git checkout v2`（推荐） / `git checkout main`（旧版）
+> 旧版（`v2` 合并前）保留在 git 历史里，需要时可用 `git log` 回溯。
 
 > [!tip] 学完这 6 个 Phase 之后看哪里？
 > **下一步：[`../Claw-Theory/`](../Claw-Theory/)** —— 从 Phase 7 起切到 [shareAI-lab/claw0](https://github.com/shareAI-lab/claw0)，学产品级常驻 Agent 的架构（多通道 / 路由 / 心跳 / 投递 / 重试 / 并发）。骨架不变（[[01 - Agent Loop]] 的循环），扩展方向是"把 Agent 从 CLI 跑成生产服务"。
