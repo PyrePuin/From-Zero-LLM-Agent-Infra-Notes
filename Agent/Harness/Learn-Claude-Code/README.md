@@ -17,7 +17,15 @@
 一个 LLM Agent 长成什么样，主要由四个接口决定：
 
 ```mermaid
-%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
+%%{init: {"theme":"base", "themeVariables": {
+  "fontSize":"16px",
+  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  "background":"#ffffff",
+  "primaryColor":"#eff6ff",
+  "primaryBorderColor":"#60a5fa",
+  "primaryTextColor":"#0f172a",
+  "lineColor":"#94a3b8"
+}}}%%
 flowchart TD
     Loop["<b>Agent Loop (s01)</b><br/>while + dispatch<br/><i>循环骨架</i>"]
     Tools["<b>Tools (s02)</b><br/>名字 + schema + handler"]
@@ -26,10 +34,12 @@ flowchart TD
     Loop -->|派发| Tools
     Loop -->|触发| Hooks
     Loop -->|读写| Messages
-    style Loop fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#451a03
-    style Tools fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style Hooks fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style Messages fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+
+    class Loop core
+    class Tools,Hooks,Messages mech
+
+    classDef core fill:#fef3c7,stroke:#d97706,stroke-width:3px,color:#78350f
+    classDef mech fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a
 ```
 
 **所有后续扩展（Phase 2 - 6）都是往这四个接口上挂东西**：
@@ -62,24 +72,38 @@ flowchart TD
 
 ## 每篇笔记的固定结构
 
+v2 分支起，每篇笔记统一为以下 12 节固定骨架（按阅读顺序）：
+
 ```
 ---
 type: concept                    ← Obsidian frontmatter
 status: seed
+series: learn-claude-code
+created / updated
 ---
 # 课题名
 
-> [!note]                        ← 一段话讲"它是什么、解决什么问题、为什么值得学"
+> [!note]                        ← 一段话讲"它是什么、解决什么问题"
 
-## 这一步加了什么                ← 四个核心问题的回答
-## 为什么需要加
-## 这是一个什么机制               ← 类比、同构概念、命名
+## 这节重点关注                  ← TL;DR：5 个核心问题 + 锚链接 + 略读指引
+## 这一步加了什么                ← 组件表格（| 新增 | 作用 | 重点? |）
+## 演进与动机                    ← 反例 + 解法核心（合并旧"为什么+机制"）
+## 核心抽象                      ← dataclass / ABC / 关键契约
+## 整体架构图                    ← mermaid（classDef 五色批量赋色）
+## <本节特有机制章节>             ← 1-3 节，按课题展开（状态机 / 并发模型 / 协议）
 ## 原本的 Claude Code 怎么做的    ← 产品化形态对照
 ## 设计要点                       ← 工程经验
-## 实现对照                       ← 简化代码放在末尾
 ## 相关概念                       ← Obsidian 双链
 > [!warning]                     ← 易踩坑
+## 代码骨架总览                  ← 50-100 行精简 Python（分块注释）
+## Q&A                           ← 本节学习卡点
 ```
+
+**设计原则**：
+- 每节只回答一个核心问题（表格先扫概览，文字再深入）
+- 代码骨架总览放在最后，读到那自然就懂——前面先建立心智模型
+- mermaid 图全部按 [`mermaid-style` skill](https://github.com/PyrePuin/From-Zero-LLM-Agent-Infra-Notes) 规范化（classDef 五色 + 批量赋色）
+- `00 - 综合总结.md` 不套此模板——它是 Phase 级别的导览，不是单课笔记
 
 ## 取舍声明
 
