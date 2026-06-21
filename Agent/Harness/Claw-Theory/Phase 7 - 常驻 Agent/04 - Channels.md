@@ -433,6 +433,119 @@ bot token 泄漏 → 攻击者可以直接给 bot 发消息触发工具调用（
 > 2. **媒体组窗口选错**：窗口太短（< 300ms）漏 update，太长（> 2s）让用户感觉 bot 卡顿。500ms 是 Telegram 实测的合理上界，不要随便改。
 > 3. **跨线程共享不加锁**：`msg_queue` 跨线程必须用 `q_lock`。`queue.Queue` 也可以但 `get()` 是阻塞的，与非阻塞 stdin 配合要 `block=False`。
 
+## 代码骨架总览
+
+剥掉所有平台细节后，s04 的抽象层只有这么多代码。这是你真正需要记住的部分——`TelegramChannel` / `FeishuChannel` 内部 600+ 行都可以忘掉，需要时翻源码。
+
+```python
+# === 1. 归一化数据结构 ===
+@dataclass
+class InboundMessage:
+    text: str                    # 归一化文本
+    sender_id: str               # 发送者 ID
+    channel: str = ""            # "cli" / "telegram" / "feishu"
+    account_id: str = ""         # 接收消息的 bot 账号
+    peer_id: str = ""            # 会话范围（user_id / chat_id / chat_id:topic:tid）
+    is_group: bool = False
+    media: list = field(default_factory=list)
+    raw: dict = field(default_factory=dict)  # 原始负载，调试用
+
+# === 2. 通道端口（ABC）===
+class Channel(ABC):
+    name: str = "unknown"
+    @abstractmethod
+    def receive(self) -> InboundMessage | None: ...
+    @abstractmethod
+    def send(self, to: str, text: str, **kwargs) -> bool: ...
+    def close(self) -> None: pass
+
+# === 3. 会话隔离键 ===
+def build_session_key(channel, account_id, peer_id):
+    return f"agent:main:direct:{channel}:{peer_id}"
+
+# === 4. 注册中心 ===
+class ChannelManager:
+    def __init__(self):
+        self.channels: dict[str, Channel] = {}     # 活的实例
+        self.accounts: list[ChannelAccount] = []   # bot 配置
+    def register(self, ch): self.channels[ch.name] = ch
+    def get(self, name): return self.channels.get(name)
+    def close_all(self):
+        for ch in self.channels.values(): ch.close()
+
+# === 5. 通道无关的回合入口 ===
+def run_agent_turn(inbound: InboundMessage, conversations, mgr):
+    sk = build_session_key(inbound.channel, inbound.account_id, inbound.peer_id)
+    conversations.setdefault(sk, [])
+    messages = conversations[sk]
+    messages.append({"role": "user", "content": inbound.text})   # ← 入口归一化
+
+    # 可选：发"正在输入"指示器（不影响消息内容）
+    if inbound.channel == "telegram":
+        tg = mgr.get("telegram")
+        if isinstance(tg, TelegramChannel):
+            tg.send_typing(inbound.peer_id.split(":topic:")[0])
+
+    while True:
+        response = client.messages.create(model=MODEL_ID, messages=messages,
+                                          system=SYSTEM_PROMPT, tools=TOOLS)
+        messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "end_turn":
+            text = "".join(b.text for b in response.content if hasattr(b, "text"))
+            mgr.get(inbound.channel).send(inbound.peer_id, text)   # ← 按来源路由
+            break
+        elif response.stop_reason == "tool_use":
+            results = [{"type": "tool_result", "tool_use_id": b.id,
+                        "content": process_tool_call(b.name, b.input)}
+                       for b in response.content if b.type == "tool_use"]
+            messages.append({"role": "user", "content": results})
+        else:  # max_tokens / stop_sequence / pause_turn
+            text = "".join(b.text for b in response.content if hasattr(b, "text"))
+            if text: mgr.get(inbound.channel).send(inbound.peer_id, text)
+            break
+
+# === 6. 主循环（缝合 CLI + 后台线程 + queue）===
+def agent_loop():
+    mgr = ChannelManager()
+    mgr.register(CLIChannel())                          # CLI 永远开
+
+    tg_channel, msg_queue, q_lock, stop_event = None, [], threading.Lock(), threading.Event()
+
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        tg = TelegramChannel(...)
+        mgr.register(tg)
+        threading.Thread(target=telegram_poll_loop, daemon=True,
+                         args=(tg, msg_queue, q_lock, stop_event)).start()
+
+    conversations = {}
+    while True:
+        # 1. 排空 Telegram 队列（最高优先级）
+        with q_lock:
+            tg_msgs = msg_queue[:]; msg_queue.clear()
+        for m in tg_msgs:
+            run_agent_turn(m, conversations, mgr)
+
+        # 2. 非阻塞读 stdin
+        if tg_channel:
+            if not select.select([sys.stdin], [], [], 0.5)[0]:
+                continue
+            user_input = sys.stdin.readline().strip()
+        else:
+            msg = cli.receive()
+            if msg is None: break
+            user_input = msg.text
+
+        # 3. CLI 走相同入口
+        run_agent_turn(
+            InboundMessage(text=user_input, sender_id="cli-user",
+                           channel="cli", account_id="cli-local", peer_id="cli-user"),
+            conversations, mgr,
+        )
+```
+
+**这 6 块构成了 s04 的全部抽象层**。下一节 s05 Gateway 会把"单 brain + 多通道"扩展成"多 brain + 多通道 + 5 级路由"，骨架仍然不变。
+
 ## Q&A
 
 学习 s04 时卡过的点。
