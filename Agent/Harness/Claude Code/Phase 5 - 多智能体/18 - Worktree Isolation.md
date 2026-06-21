@@ -163,6 +163,7 @@ git worktree 天生支持这个——一个 repo 多个 working tree，每个有
 ### Git Worktree：一个 repo，多个工作目录
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Repo["主 repo（/WORKDIR）"]
         Main["main 分支<br/>(HEAD)"]
@@ -182,9 +183,9 @@ flowchart TB
     WT1 -->|"独立 working tree"| W1
     WT2 -->|"独立 working tree"| W2
 
-    style Repo fill:#fde68a,stroke:#b45309
-    style WT1 fill:#dbeafe,stroke:#1e40af
-    style WT2 fill:#d1fae5,stroke:#047857
+    style Repo fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style WT1 fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style WT2 fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
 ```
 
 `git worktree add <path> -b <branch>` 命令做的事：
@@ -198,6 +199,7 @@ flowchart TB
 ### Task ↔ Worktree 双向绑定
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart LR
     T["Task<br/>id: task_001<br/>worktree: 'auth'<br/>status: pending"]
     W["Worktree<br/>name: auth<br/>path: .worktrees/auth/<br/>branch: wt/auth"]
@@ -205,8 +207,8 @@ flowchart LR
     T -->|"worktree 字段引用 name"| W
     W -.->|"task_id 记在 events.jsonl"| T
 
-    style T fill:#fef3c7,stroke:#b45309
-    style W fill:#dbeafe,stroke:#1e40af
+    style T fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style W fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
 ```
 
 - Task 里有 `worktree` 字段 → 指向 worktree name
@@ -340,6 +342,7 @@ CC 的 `worktree.ts:76-84` 校验 slug：拒绝 `.` / `..`，允许 `[a-zA-Z0-9.
 ## 整体逻辑：函数之间的关系
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph TaskSys["任务系统（继承 s12 + worktree 字段）"]
         T1["Task<br/>+ worktree: str | None"]
@@ -402,11 +405,11 @@ flowchart TB
     R4 --> R5
     R5 --> R1
 
-    style TaskSys fill:#fef3c7,stroke:#b45309
-    style WTSys fill:#dbeafe,stroke:#1e40af,stroke-width:2px
-    style Lead fill:#fde68a,stroke:#b45309
-    style Teammate fill:#d1fae5,stroke:#047857
-    style FS fill:#ecfccb,stroke:#4d7c0f
+    style TaskSys fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style WTSys fill:#dbeafe,stroke:#1e40af,stroke-width:2px,color:#1e3a8a
+    style Lead fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Teammate fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style FS fill:#ecfccb,stroke:#4d7c0f,stroke-width:2.5px,color:#064e3b
 ```
 
 ### 调用关系详解
@@ -568,6 +571,7 @@ s18 是 Phase 5 的**收尾课**——多 Agent 协作的"并发安全"基石。
 s18 跟 s17 的线程结构**完全一样**——主线程 + Teammate daemon thread。但**磁盘布局变了**：
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Threads["线程（继承 s17）"]
         Main["主线程<br/>Lead agent_loop<br/>cwd = WORKDIR"]
@@ -589,8 +593,8 @@ flowchart TB
     B -.->|"读写 task 状态"| Tasks
     Main -.->|"读写 task 状态"| Tasks
 
-    style Threads fill:#fde68a,stroke:#b45309
-    style FS fill:#ecfccb,stroke:#4d7c0f,stroke-width:2px
+    style Threads fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style FS fill:#ecfccb,stroke:#4d7c0f,stroke-width:2px,color:#064e3b
 ```
 
 ### 关键变化：文件操作不再竞争

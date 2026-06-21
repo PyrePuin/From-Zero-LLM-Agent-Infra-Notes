@@ -34,6 +34,7 @@ tags:
 加上一个**反应式兜底**：API 返回 `prompt_too_long` 错误时，立即强制触发 L4。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TD
     Start(["每轮循环开头"])
     L3["<b>L3 tool_result_budget</b><br/>单条 > 200K 字符 → 落盘<br/><i>成本: 一次磁盘 IO</i>"]
@@ -53,11 +54,11 @@ flowchart TD
     Err -->|是| React --> Call
     Err -->|否| Done
 
-    style L1 fill:#d1fae5,stroke:#047857
-    style L2 fill:#d1fae5,stroke:#047857
-    style L3 fill:#fef3c7,stroke:#b45309
-    style L4 fill:#fecaca,stroke:#991b1b
-    style React fill:#fecaca,stroke:#991b1b
+    style L1 fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style L2 fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style L3 fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style L4 fill:#fecaca,stroke:#991b1b,stroke-width:2.5px,color:#7f1d1d
+    style React fill:#fecaca,stroke:#991b1b,stroke-width:2.5px,color:#7f1d1d
 ```
 
 ## 为什么是分层而不是一刀切

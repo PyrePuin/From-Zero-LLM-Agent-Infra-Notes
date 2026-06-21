@@ -121,6 +121,7 @@ cron 需要：
 ### 4 层架构 + 队列解耦
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph L1["第 1 层：Scheduler 守护线程"]
         S1["cron_scheduler_loop<br/>每秒醒<br/>判时间 → 入队"]
@@ -146,12 +147,12 @@ flowchart TB
     QP1 -->|"调用"| A1
     A1 -->|"consume"| Q1
 
-    style L1 fill:#fde68a,stroke:#b45309
-    style L2 fill:#dbeafe,stroke:#1e40af
-    style L3 fill:#fde68a,stroke:#b45309
-    style L4 fill:#d1fae5,stroke:#047857
-    style SJ fill:#fef3c7,stroke:#b45309
-    style AL fill:#fce7f3,stroke:#be185d
+    style L1 fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style L2 fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style L3 fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style L4 fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style SJ fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style AL fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
 ```
 
 ### 为什么分 4 层
@@ -261,6 +262,7 @@ s14 教学版覆盖了核心（recurring + durable + cancel），但没暴露模
 ## 整体逻辑：函数之间的关系
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Tools["LLM 可调工具"]
         T1["run_schedule_cron"]
@@ -313,12 +315,12 @@ flowchart TB
     A2 --> Q2
     A2 --> A3 --> A1
 
-    style Tools fill:#d1fae5,stroke:#047857
-    style Registration fill:#dbeafe,stroke:#1e40af
-    style Persistence fill:#e0e7ff,stroke:#4338ca
-    style Scheduler fill:#fde68a,stroke:#b45309
-    style Queue fill:#fef3c7,stroke:#b45309
-    style Agent fill:#fce7f3,stroke:#be185d
+    style Tools fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style Registration fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Persistence fill:#e0e7ff,stroke:#4338ca,stroke-width:2.5px,color:#312e81
+    style Scheduler fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Queue fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Agent fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
 ```
 
 ### 调用关系详解
@@ -466,6 +468,7 @@ def queue_processor_loop():
 s14 是 Phase 4 引入最多并发的一课。**三个长期线程** + s13 的临时 daemon。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Main["主线程（永久）"]
         M1["input loop<br/>等用户输入"]
@@ -507,12 +510,12 @@ flowchart TB
     M2 -->|"派发慢工具"| D1
     M2 -->|"派发慢工具"| D2
 
-    style Main fill:#fde68a,stroke:#b45309
-    style Scheduler fill:#dbeafe,stroke:#1e40af
-    style Processor fill:#dbeafe,stroke:#1e40af
-    style Daemon fill:#fef3c7,stroke:#b45309
-    style AL fill:#fce7f3,stroke:#be185d
-    style CL fill:#fce7f3,stroke:#be185d
+    style Main fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Scheduler fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Processor fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Daemon fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style AL fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
+    style CL fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
 ```
 
 ### 三个长期线程的职责矩阵

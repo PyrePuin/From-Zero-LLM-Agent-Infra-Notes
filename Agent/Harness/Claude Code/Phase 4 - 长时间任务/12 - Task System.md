@@ -87,6 +87,7 @@ s05 的 TodoWrite 把任务列表存在 messages 的 tool_result 里。会话结
 每个 task 有 3 个状态，2 个合法转换：
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 stateDiagram-v2
     [*] --> pending: create_task
     pending --> in_progress: claim_task
@@ -110,6 +111,7 @@ stateDiagram-v2
 - 缺失的依赖（id 找不到文件）= 视为未完成 = 不能 start。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart LR
     T1["task_1<br/>重构 auth<br/>completed"]
     T2["task_2<br/>写测试<br/>completed"]
@@ -119,10 +121,10 @@ flowchart LR
     T2 --> T3
     T3 --> T4
 
-    style T1 fill:#d1fae5,stroke:#047857
-    style T2 fill:#d1fae5,stroke:#047857
-    style T3 fill:#fef3c7,stroke:#b45309
-    style T4 fill:#dbeafe,stroke:#1e40af
+    style T1 fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style T2 fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style T3 fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style T4 fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
 ```
 
 ### 文件粒度持久化
@@ -178,6 +180,7 @@ CC 的 task 状态会同步到 UI（spinner、状态图标）。s12 只 print �
 ## 整体逻辑：函数之间的关系
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Tools["LLM 可调工具"]
         T1["run_create_task"]
@@ -217,9 +220,9 @@ flowchart TB
     I8 --> I4
     I8 --> I6
 
-    style Tools fill:#d1fae5,stroke:#047857
-    style Internal fill:#dbeafe,stroke:#1e40af
-    style Storage fill:#e0e7ff,stroke:#4338ca
+    style Tools fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style Internal fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Storage fill:#e0e7ff,stroke:#4338ca,stroke-width:2.5px,color:#312e81
 ```
 
 ### 调用关系详解

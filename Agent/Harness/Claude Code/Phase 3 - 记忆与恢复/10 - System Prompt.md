@@ -62,6 +62,7 @@ s10 的转变就是把 SYSTEM 从**程序常量**升级成**配置对象**。
 这是 **Section-Based Prompt Assembly + Memoized Lookup** 模式。三个独立职责：
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart LR
     State[("真实状态<br/>文件系统 / TOOL_HANDLERS")]
     Ctx["update_context()<br/>读状态 → context dict"]
@@ -73,9 +74,9 @@ flowchart LR
     Cache -->|miss| Asm --> API
     Cache -->|hit| API
 
-    style Ctx fill:#dbeafe,stroke:#1e40af
-    style Cache fill:#fde68a,stroke:#b45309
-    style Asm fill:#dbeafe,stroke:#1e40af
+    style Ctx fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Cache fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Asm fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
 ```
 
 ### 三个函数各司其职

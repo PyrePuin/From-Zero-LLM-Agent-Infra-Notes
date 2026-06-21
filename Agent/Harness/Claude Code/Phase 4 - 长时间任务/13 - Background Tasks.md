@@ -120,6 +120,7 @@ claim_task(t1) → 跑 pytest（同步 3 分钟） → complete_task(t1) → cla
 ### Producer-Consumer with Notification Injection
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart LR
     subgraph Producer["主线程（生产者）"]
         Main["agent_loop dispatch<br/>should_run_background?"]
@@ -152,15 +153,16 @@ flowchart LR
     Collect --> BR
     Collect --> Msg
 
-    style Main fill:#fde68a,stroke:#b45309
-    style Worker fill:#dbeafe,stroke:#1e40af
-    style Shared fill:#fef3c7,stroke:#b45309
-    style Inject fill:#d1fae5,stroke:#047857
+    style Main fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Worker fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Inject fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
 ```
 
 ### 时序图：一个后台任务的生命周期
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 sequenceDiagram
     participant M as 主线程 agent_loop
     participant Q as background_tasks dict
@@ -265,6 +267,7 @@ CC 在派发后台任务后，会**额外调一次 Haiku（小模型）** 生成
 这个标签显示在 UI 的任务条上。它**和主模型的对话并行**：
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 sequenceDiagram
     participant User as 用户
     participant Main as 主模型 (Opus)
@@ -298,6 +301,7 @@ CC 暴露给模型 `BashOutput`（查后台任务输出）和 `KillShell`（强�
 ## 整体逻辑：函数之间的关系
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Main["主线程"]
         Loop["agent_loop dispatch"]
@@ -337,9 +341,9 @@ flowchart TB
     Lock -.->|"保护"| BT
     Lock -.->|"保护"| BR
 
-    style Main fill:#fde68a,stroke:#b45309
-    style Daemon fill:#dbeafe,stroke:#1e40af
-    style Shared fill:#fef3c7,stroke:#b45309
+    style Main fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Daemon fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
 ```
 
 ### 调用关系详解
@@ -467,6 +471,7 @@ thread.start()
 ### 线程生命周期
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart LR
     Main["主线程<br/>(永久)"]
     B1["bg_001<br/>daemon<br/>(临时)"]
@@ -481,10 +486,10 @@ flowchart LR
     B2 -.->|"完成销毁"| Gone2[("-")]
     B3 -.->|"运行中..."]| Still[("running")]
 
-    style Main fill:#fde68a,stroke:#b45309
-    style B1 fill:#dbeafe,stroke:#1e40af
-    style B2 fill:#dbeafe,stroke:#1e40af
-    style B3 fill:#dbeafe,stroke:#1e40af
+    style Main fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style B1 fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style B2 fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style B3 fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
 ```
 
 主线程跑 agent_loop 期间，可能同时有 N 个 daemon 在跑后台任务。**N 个后台任务真正并行**（如果它们是 I/O bound，GIL 不影响）。

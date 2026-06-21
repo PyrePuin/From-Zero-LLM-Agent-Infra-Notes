@@ -7,6 +7,7 @@
 一个 LLM Agent 长成什么样，主要由四个接口决定：
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TD
     Loop["<b>Agent Loop (s01)</b><br/>while + dispatch<br/><i>循环骨架</i>"]
     Tools["<b>Tools (s02)</b><br/>名字 + schema + handler"]
@@ -15,10 +16,10 @@ flowchart TD
     Loop -->|派发| Tools
     Loop -->|触发| Hooks
     Loop -->|读写| Messages
-    style Loop fill:#fde68a,stroke:#b45309,stroke-width:2px
-    style Tools fill:#dbeafe,stroke:#1e40af
-    style Hooks fill:#dbeafe,stroke:#1e40af
-    style Messages fill:#dbeafe,stroke:#1e40af
+    style Loop fill:#fde68a,stroke:#b45309,stroke-width:2px,color:#451a03
+    style Tools fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Hooks fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Messages fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
 ```
 
 **所有后续扩展（Phase 2 - 6）都是往这四个接口上挂东西**：

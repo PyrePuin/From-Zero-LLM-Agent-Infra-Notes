@@ -182,6 +182,7 @@ Lead 看 `pending_requests[R1].status` 就知道 Teammate 真的关了。
 ### 协议 = 状态机 + 双向消息 + ID 关联
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Shared["共享状态（全局）"]
         P["pending_requests: dict<br/>req_id → ProtocolState"]
@@ -218,10 +219,10 @@ flowchart TB
     L2 -->|"*_response 自动路由"| L3
     L3 -->|"更新 status"| P
 
-    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:2px
-    style LeadSide fill:#fde68a,stroke:#b45309
-    style TeammateSide fill:#dbeafe,stroke:#1e40af
-    style Bus fill:#d1fae5,stroke:#047857
+    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    style LeadSide fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style TeammateSide fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Bus fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
 ```
 
 ### 关键概念：协议方向是对称的，但发起方不同
@@ -236,6 +237,7 @@ flowchart TB
 ### 状态机
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 stateDiagram-v2
     [*] --> pending: 发起方调用<br/>run_request_* / submit_plan
     pending --> approved: 响应方 approve=True
@@ -331,6 +333,7 @@ s16 的 `pending_requests` 是纯内存，进程崩了全丢。CC 把它存到�
 ## 整体逻辑：函数之间的关系
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Shared["共享状态"]
         P["pending_requests<br/>ProtocolState"]
@@ -406,14 +409,14 @@ flowchart TB
     ML1 -->|"调用工具"| R4
     ML1 -->|"调用工具"| SP1
 
-    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:2px
-    style LeadTools fill:#fde68a,stroke:#b45309
-    style LeadInbox fill:#fce7f3,stroke:#be185d
-    style TeammateTools fill:#d1fae5,stroke:#047857
-    style TeammateLoop fill:#dbeafe,stroke:#1e40af
-    style Spawn fill:#ede9fe,stroke:#6d28d9
-    style Bus fill:#ecfccb,stroke:#4d7c0f
-    style MainLoop fill:#fee2e2,stroke:#b91c1c
+    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    style LeadTools fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style LeadInbox fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
+    style TeammateTools fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style TeammateLoop fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Spawn fill:#ede9fe,stroke:#6d28d9,stroke-width:2.5px,color:#4c1d95
+    style Bus fill:#ecfccb,stroke:#4d7c0f,stroke-width:2.5px,color:#064e3b
+    style MainLoop fill:#fee2e2,stroke:#b91c1c,stroke-width:2.5px,color:#7f1d1d
 ```
 
 ### 调用关系详解
@@ -632,6 +635,7 @@ s16 是 Phase 5 的"深化课"——不引入新的并行 agent，而是把已�
 s16 跟 s15 的线程结构**完全一样**：主线程 + scheduler 守护线程 + queue processor 守护线程 + 若干 Teammate daemon thread + 临时 background worker。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Long["长期线程"]
         Main["主线程<br/>Lead agent_loop"]
@@ -665,10 +669,10 @@ flowchart TB
     T1 -->|"读写"| B2
     T2 -->|"读写"| B3
 
-    style Long fill:#fde68a,stroke:#b45309
-    style Teammates fill:#dbeafe,stroke:#1e40af
-    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:2px
-    style Bus fill:#ecfccb,stroke:#4d7c0f
+    style Long fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Teammates fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Shared fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#451a03
+    style Bus fill:#ecfccb,stroke:#4d7c0f,stroke-width:2.5px,color:#064e3b
 ```
 
 ### 关键变化：Teammate 变成长寿命

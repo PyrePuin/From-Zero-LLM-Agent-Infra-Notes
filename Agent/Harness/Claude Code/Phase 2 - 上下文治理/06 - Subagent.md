@@ -64,6 +64,7 @@ Agent 里的 Subagent 完全对应：
 - **Join**：子 Agent 跑完，只把最后一段文字返回。主 Agent 把这段文字当 tool_result 接收。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 sequenceDiagram
     participant M as 主 Agent
     participant S as 子 Agent

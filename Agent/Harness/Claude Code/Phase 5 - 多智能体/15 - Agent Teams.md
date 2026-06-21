@@ -107,6 +107,7 @@ s15 的 MessageBus + 长期 teammate 解决这三件事。
 ### Lead-Teammate Architecture + File-Based Message Bus
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Main["主线程（Lead）"]
         L1["Lead agent_loop<br/>messages = history"]
@@ -134,14 +135,15 @@ flowchart TB
     T2 -->|"read_inbox(bob)"| B3
     L2 -->|"read_inbox(lead)"| B1
 
-    style Main fill:#fde68a,stroke:#b45309
-    style Bus fill:#dbeafe,stroke:#1e40af
-    style Teammates fill:#d1fae5,stroke:#047857
+    style Main fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Bus fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Teammates fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
 ```
 
 ### 消息流：单向、异步、文件持久
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 sequenceDiagram
     participant Lead
     participant Bus as MessageBus
@@ -276,6 +278,7 @@ CC 的多 Agent 能跨进程通信（通过 MCP）。s15 只在同一进程内�
 ## 整体逻辑：函数之间的关系
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Tools["LLM 工具（Lead 用）"]
         T1["run_spawn_teammate"]
@@ -320,11 +323,11 @@ flowchart TB
     M1 -->|"调用"| T3
     M2 --> B2
 
-    style Tools fill:#d1fae5,stroke:#047857
-    style Spawn fill:#fde68a,stroke:#b45309
-    style Closure fill:#dbeafe,stroke:#1e40af
-    style Bus fill:#fef3c7,stroke:#b45309
-    style Main fill:#fce7f3,stroke:#be185d
+    style Tools fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
+    style Spawn fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Closure fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Bus fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Main fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
 ```
 
 ### 调用关系详解
@@ -452,6 +455,7 @@ s15 是**最激进的扩展**——直接造一个并行的 agent。
 s15 在 s14 的三个长期线程基础上，**多了若干个 teammate daemon thread**。
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
 flowchart TB
     subgraph Long["长期线程（继承 s14）"]
         Main["主线程<br/>Lead agent_loop"]
@@ -475,9 +479,9 @@ flowchart TB
     Main -->|"派发慢工具"| B1
     Main -->|"派发慢工具"| B2
 
-    style Long fill:#fde68a,stroke:#b45309
-    style Teammates fill:#dbeafe,stroke:#1e40af
-    style Temp fill:#fef3c7,stroke:#b45309
+    style Long fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    style Teammates fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
+    style Temp fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
 ```
 
 ### 关键特征：**第一次有多个真正的 agent loop 并行**
