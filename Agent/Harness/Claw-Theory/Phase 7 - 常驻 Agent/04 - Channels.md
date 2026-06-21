@@ -25,9 +25,36 @@ tags:
 > [!warning] Phase 7 编号说明
 > Phase 1-6 是 learn-claude-code 的 s01-s20（20 节）。Phase 7 切到 **claw0**（shareAI-lab），claw0 自己有 s01-s10 编号。本目录文件名用 `04 - Channels.md`（claw0 原编号），**不是**续接 learn-claude-code 的 s04 Hooks。
 
+## 这节重点关注
+
+读完这节，你应该能在脑子里答出这 5 个问题：
+
+1. **入口契约**：`InboundMessage` 是什么？为什么所有平台都要归一化成它？（→ [核心抽象](#核心抽象)）
+2. **通道接口**：`Channel` ABC 只有哪两个方法？加新平台要做什么？（→ [核心抽象](#channel-abc-与-channelmanager)）
+3. **会话隔离**：`peer_id` 怎么编码会话范围？多通道下怎么保证 A 用户飞书的历史不串到 B 用户 Telegram？（→ [核心抽象](#inboundmessage-字段语义)）
+4. **并发模型**：为什么 Telegram 长轮询不能放主线程？后台线程 + 队列 + 锁怎么配合？（→ [并发模型](#并发模型后台线程--共享队列)）
+5. **回复路由**：Telegram 来的问题怎么保证回复也走 Telegram？（→ [run_agent_turn](#run_agent_turn通道无关的回合入口)）
+
+**可以略读/跳过**：`TelegramChannel` / `FeishuChannel` 内部所有 `_buf_*` / `_flush_*` / `_parse` / `_refresh_token` 方法——这些是平台细节，用到时翻源码就行。**抽象层是主菜，平台实现是配菜。**
+
+## 这一步加了什么
+
+| 新增 | 作用 | 重点? |
+|---|---|---|
+| `InboundMessage` dataclass | 所有平台消息归一化的统一格式（text + sender_id + peer_id + media + raw） | ⭐⭐⭐ |
+| `Channel` ABC | 接口契约：`receive() → InboundMessage \| None` + `send(to, text) → bool` | ⭐⭐⭐ |
+| `build_session_key()` | 一行函数：`channel:peer_id` 编码会话范围 | ⭐⭐ |
+| `ChannelManager` | 注册中心：`register()` / `get(name)` / `list_channels()` | ⭐⭐ |
+| `run_agent_turn(inbound, ...)` | 与通道无关的回合入口，按 `inbound.channel` 路由回复 | ⭐⭐⭐ |
+| `agent_loop` 主循环 | 缝合 CLI + Telegram 后台线程 + 共享 queue | ⭐⭐ |
+| `CLIChannel` | 最小参考实现：`input()` + `print()` | ⭐ |
+| `TelegramChannel` | Bot API 长轮询 + offset 持久化 + 媒体组/文本缓冲 | 略读 |
+| `FeishuChannel` | webhook 事件解析 + token 刷新 + @提及过滤 | 略读 |
+| `telegram_poll_loop` 线程 | 后台轮询 + `queue + lock` 跨线程递交 | ⭐ |
+
 ## 演进与动机
 
-s01-s03 的循环假设输入是 `str`，输出也是 `str`。现在 Telegram 给你一个嵌套字典 `{"message": {"chat": {"id": 123}, "text": "hi"}}`，飞书给你二次 JSON 解析的 `{"event": {"message": {"content": "{\"text\":\"hi\"}"}}}`。如果循环直接吃这些负载：
+s01-s03 的循环假设输入是 `str`，输出也是 `str`。现在 Telegram 给你嵌套字典 `{"message": {"chat": {"id": 123}, "text": "hi"}}`，飞书给你二次 JSON 解析的 `{"event": {"message": {"content": "{\"text\":\"hi\"}"}}}`。如果循环直接吃这些负载：
 
 ```python
 # 灾难现场
@@ -36,19 +63,18 @@ if channel == "telegram":
     chat_id = payload["message"]["chat"]["id"]
 elif channel == "feishu":
     text = json.loads(payload["event"]["message"]["content"])["text"]
+    chat_id = payload["event"]["message"]["chat_id"]
+elif channel == "slack":
     ...
 ```
 
 每加一个平台就要改循环里 N 个地方。**循环认识平台 = 强耦合 = 不可维护**。
 
-更深的问题是**协议怪癖**——每个平台都有必须吸收掉的脏活：
+s04 的解法是经典的"加一层"：在循环和平台之间插入 Channel 适配器，**把所有平台差异吸收在适配器内部**，对外只暴露统一的 `InboundMessage`。循环从此再也不接触平台负载，加新平台 = 实现一个 Channel 子类，循环代码一行不改。
 
-- **Telegram 长粘贴被拆条**：用户一次粘贴 10000 字，Telegram 拆成 5 条 message，agent 看到 5 个"不完整的问题"。需要 1s 静默窗口合并。
-- **Telegram 媒体组**：一次发 5 张图，Telegram 用同一个 `media_group_id` 分 5 次 update 推过来。需要 500ms 窗口聚合。
-- **飞书群聊 @ 过滤**：群里 100 个人说话，bot 只回应 @自己 的那条。
-- **Telegram offset 持久化**：长轮询的 `update_id` 必须存盘，重启后从 `offset+1` 开始，否则**重复处理所有历史消息**。
+再叠一层产品需求——**同一个 brain 同时挂 Telegram + 飞书 + CLI**——这要求会话隔离（A 用户飞书的历史不能塞给 B 用户 Telegram）。s04 用 `build_session_key(channel, account_id, peer_id)` 把"哪个通道 + 哪个 bot + 哪个会话"编码成唯一键，conversations dict 按键分桶。回复时按 `inbound.channel` 反查通道发回去。
 
-s04 的解法：把这些脏活封装在 Channel 适配器里，吐出干净的 `InboundMessage`。再加一层产品需求——**同一个 brain 同时挂 Telegram + 飞书 + CLI**——要求会话隔离（A 用户飞书的历史不能塞给 B 用户 Telegram）。这要求输入归一化 + 会话键统一 + 回复按来源路由。
+至于 Telegram 的 offset 持久化、媒体组合并、飞书的 token 刷新——这些是**协议怪癖**，被关在各自 Channel 内部，循环完全看不到。后面 [平台怪癖的共性模式](#平台怪癖的共性模式) 一节会归类讲。
 
 ## 核心抽象
 
