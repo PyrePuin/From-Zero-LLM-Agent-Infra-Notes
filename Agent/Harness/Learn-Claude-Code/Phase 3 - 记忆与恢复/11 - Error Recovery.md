@@ -3,7 +3,7 @@ type: concept
 status: seed
 domain: llm-agent
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-21
 aliases:
   - error recovery
   - retry
@@ -20,20 +20,33 @@ tags:
 > [!note]
 > Agent 跑着跑着 API 返回 529 过载、429 限流、`prompt_too_long`、`max_tokens` 截断——这些都是**常态**，不是 bug。s11 在 LLM 调用外包一层 try/except，按错误类型走不同的恢复路径：截断就升级 token、超限就压缩上下文、限流就指数退避。Agent 从"一碰就熄火"变成"会自我修复"。
 
+## 这节重点关注
+
+读完这节，你应该能在脑子里答出这 5 个问题：
+
+1. **三层分类**：瞬态（429/529）vs 永久（prompt_too_long）vs 截断（max_tokens）——各走什么路径？（→ [整体架构图](#整体架构图)）
+2. **指数退避 + 抖动**：为什么必须有 jitter？没有抖动会怎样？（→ [指数退避-抖动](#指数退避--抖动)）
+3. **升级 vs 续写**：为什么升级时不动 messages？为什么续写必须保存截断输出？（→ [设计要点](#设计要点)）
+4. **RecoveryState**：为什么"升级过没有"必须跨循环迭代保持？`consecutive_529` 为什么成功后清零？（→ [设计要点](#设计要点)）
+5. **字符串匹配**：为什么 `is_prompt_too_long_error` 用字符串匹配而不是 catch 特定异常类？（→ [设计要点](#设计要点)）
+
+**可以略读/跳过**：CC 的十几种 reason code、流式错误的特殊处理。**三路径分类 + RecoveryState + 退避抖动是主菜，reason 枚举是配菜。**
+
 ## 这一步加了什么
 
-- 一个 `RecoveryState` 类：跟踪本轮里"升级过没有、压缩过没有、529 连续几次、当前用哪个模型"。
-- 一个 `with_retry(fn, state)` 包装器：处理瞬态错误（429 / 529），指数退避 + 抖动。
-- 一个 `retry_delay(attempt)` 函数：`min(500 × 2^attempt, 32000) + random(0~25%)`。
-- 三个恢复路径，根据错误类型走：
-  - **Path 1**：`max_tokens` 截断 → 升级 8K → 64K，还不够就续写提示（最多 3 次）。
-  - **Path 2**：`prompt_too_long` → 触发 reactive_compact（只压一次，再失败就退出）。
-  - **Path 3**：429 / 529 → 指数退避，连续 3 次 529 切换备用模型。
-- 一个 `is_prompt_too_long_error(e)` 字符串匹配器：识别各种"上下文太长"错误。
+| 新增 | 作用 | 重点? |
+|---|---|---|
+| `RecoveryState` 类 | 跟踪本轮"升级过没有 / 压过没有 / 529 连续几次 / 当前模型" | ⭐⭐⭐ |
+| `with_retry(fn, state)` | 处理瞬态错误（429 / 529），指数退避 + 抖动，非瞬态 re-raise | ⭐⭐⭐ |
+| `retry_delay(attempt)` | `min(500 × 2^attempt, 32000) + random(0~25%)`，支持 `Retry-After` | ⭐⭐ |
+| Path 1: max_tokens 截断 | 升级 8K → 64K（1 次），还不够就续写提示（最多 3 次） | ⭐⭐⭐ |
+| Path 2: prompt_too_long | 触发 reactive_compact（只压一次，再失败就退出） | ⭐⭐ |
+| Path 3: 429 / 529 | 指数退避，连续 3 次 529 切换 fallback model | ⭐⭐ |
+| `is_prompt_too_long_error(e)` | 字符串匹配器，识别各种"上下文太长"错误 | ⭐ |
 
-## 为什么需要加
+## 演进与动机
 
-### 1. 生产环境 API 错误是常态
+生产环境 API 错误是**常态**，不是 bug：
 
 | 错误 | 触发场景 | 频率 |
 |---|---|---|
@@ -43,58 +56,89 @@ tags:
 | `prompt_too_long` | 上下文压缩后还是太长 | s08 兜底失效时 |
 | 网络抖动 / timeout | TCP / DNS 问题 | 偶发 |
 
-这些**不是代码 bug**——是分布式系统和 LLM 服务的物理特性。Agent 不处理就是"一碰就熄火的车"。
+这些是分布式系统和 LLM 服务的物理特性。Agent 不处理就是"一碰就熄火的车"。
 
-### 2. s08 的 reactive_compact 是雏形但不够
+s08 已经在 `agent_loop` 里 catch `prompt_too_long` 触发 reactive_compact——但只有这一种恢复，截断直接接受、限流/过载直接抛异常。s11 把缺口一次性补齐。
 
-s08 已经在 `agent_loop` 里 catch `prompt_too_long` 触发 reactive_compact。但只有这一种恢复，没有：
+更深的产品需求：Phase 4 之后 Agent 会跑后台任务、定时任务，**没人在场**时 API 报错必须自己处理。s11 是 Phase 4 的前置条件——没有 error recovery，后台任务必死。
 
-- 截断怎么办（s08 直接接受截断的输出）。
-- 限流怎么办（s08 直接抛异常）。
-- 过载怎么办（同上）。
+s11 的解法是 **Classify-then-Recover**（分布式系统里到处都是）：把错误按瞬态/永久/截断分三类，每类走"判断错误类型 → 选恢复动作 → 限制次数 → 重试或退出"。**有限重试 + 优雅退出**，不是无限重试。
 
-s11 把这些一次性补齐。
+## 核心抽象
 
-### 3. Agent 要能"无人值守"地长跑
+### 三层错误分类
 
-Phase 4 之后 Agent 会跑后台任务、定时任务。**没人在场**的时候 API 报错，Agent 必须自己处理。s11 是 Phase 4 的前置条件——没有 error recovery，后台任务必死。
+| 层 | 错误 | 处理者 | 次数限制 | 为什么 |
+|---|---|---|---|---|
+| 瞬态 | 429 / 529 | `with_retry` | 10 次 | 下次可能成功，值得重试 |
+| 永久 | `prompt_too_long` | 外层 except | 1 次（reactive_compact） | 重试也没用，要么压要么放弃 |
+| 截断 | `max_tokens` | stop_reason 分支 | 升级 1 次 + 续写 3 次 | 升级到上限后改用续写 |
 
-## 这是一个什么机制
+### RecoveryState：跨迭代的状态
+
+```python
+class RecoveryState:
+    def __init__(self):
+        self.has_escalated = False                  # max_tokens 升级过没有
+        self.recovery_count = 0                     # 续写次数
+        self.consecutive_529 = 0                    # 连续 529 次数（成功清零）
+        self.has_attempted_reactive_compact = False # 压缩过没有
+        self.current_model = PRIMARY_MODEL          # 当前模型（可能切 fallback）
+```
+
+这些字段都需要**跨循环迭代**保持——"升级过没有"不能每轮重置。所以放进一个对象，在 agent_loop 开头创建一次。注意 RecoveryState 是 agent_loop 的局部变量，**不跨会话**——每次新会话从默认值重新开始。
+
+## 整体架构图
 
 这是 **Classify-then-Recover** 模式，分布式系统里到处都是：
 
 ```mermaid
-%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
+%%{init: {"theme":"base", "themeVariables": {
+  "fontSize":"16px",
+  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  "background":"#ffffff",
+  "primaryColor":"#eff6ff",
+  "primaryBorderColor":"#60a5fa",
+  "primaryTextColor":"#0f172a",
+  "lineColor":"#94a3b8"
+}}}%%
 flowchart TD
-    Call["调 LLM"]
-    Try{"with_retry<br/>处理瞬态"}
-    Try -->|429/529| Backoff["指数退避<br/>+ 抖动"]
+    Call["<b>调 LLM</b>"]
+    Try{"<b>with_retry</b><br/>处理瞬态"}
+    Try -->|429/529| Backoff["<b>指数退避</b><br/>+ 抖动"]
     Backoff --> Try
     Try -->|成功| OK(["继续循环"])
-    Try -->|其他异常| Outer{"外层 except"}
-    Outer -->|prompt_too_long| Compact["reactive_compact<br/>只压一次"]
+    Try -->|其他异常| Outer{"<b>外层 except</b>"}
+    Outer -->|prompt_too_long| Compact["<b>reactive_compact</b><br/>只压一次"]
     Outer -->|其他| Exit(["记录 + 退出"])
-    Compact --> Retry2{"已压过?"}
+    Compact --> Retry2{"<b>已压过?</b>"}
     Retry2 -->|否| Call
     Retry2 -->|是| Exit
 
-    Call --> Stop{"stop_reason"}
-    Stop -->|max_tokens| Esc{"已升级?"}
-    Esc -->|否| Up["8K → 64K"]
+    Call --> Stop{"<b>stop_reason</b>"}
+    Stop -->|max_tokens| Esc{"<b>已升级?</b>"}
+    Esc -->|否| Up["<b>8K → 64K</b>"]
     Up --> Call
-    Esc -->|是| Cont["保存截断 +<br/>续写提示"]
-    Cont --> Retry3{"续写次数 < 3?"}
+    Esc -->|是| Cont["<b>保存截断 +</b><br/><b>续写提示</b>"]
+    Cont --> Retry3{"<b>续写 &lt; 3?</b>"}
     Retry3 -->|是| Call
     Retry3 -->|否| Exit
     Stop -->|tool_use| Tools(["执行工具"])
     Stop -->|其他| Done(["完成"])
 
-    style Try fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style Outer fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style Backoff fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style Up fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
-    style Cont fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
-    style Compact fill:#fecaca,stroke:#991b1b,stroke-width:2.5px,color:#7f1d1d
+    class Call mech
+    class Try,Outer,Stop,Esc,Retry2,Retry3 decision
+    class Backoff,Up,Cont,Compact mech
+    class OK,Exit,Tools,Done terminal
+
+    classDef core fill:#fef3c7,stroke:#d97706,stroke-width:3px,color:#78350f
+    classDef mech fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a
+    classDef data fill:#fce7f3,stroke:#db2777,stroke-width:2px,color:#831843
+    classDef external fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef persist fill:#e0e7ff,stroke:#6366f1,stroke-width:2px,color:#312e81
+    classDef decision fill:#fef9c3,stroke:#eab308,stroke-width:2px,color:#713f12
+    classDef warn fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
+    classDef terminal fill:#f3f4f6,stroke:#6b7280,stroke-width:1.5px,color:#1f2937
 ```
 
 ### 三个恢复路径的对称性
@@ -231,17 +275,7 @@ return  # 压过了还超，退出
 
 ### 4. RecoveryState 跨迭代保持状态
 
-```python
-class RecoveryState:
-    def __init__(self):
-        self.has_escalated = False
-        self.recovery_count = 0
-        self.consecutive_529 = 0
-        self.has_attempted_reactive_compact = False
-        self.current_model = PRIMARY_MODEL
-```
-
-这些字段都需要**跨循环迭代**保持——"升级过没有"不能每轮重置。所以放进一个对象，在 agent_loop 开头创建一次。
+`RecoveryState`（定义见 [核心抽象](#核心抽象)）的所有字段都需要**跨循环迭代**保持——"升级过没有"不能每轮重置。所以放进一个对象，在 agent_loop 开头创建一次。
 
 `consecutive_529` 在成功时重置为 0：
 
@@ -270,17 +304,7 @@ def is_prompt_too_long_error(e):
 
 ## 实现对照（s11/code.py）
 
-RecoveryState：
-
-```python
-class RecoveryState:
-    def __init__(self):
-        self.has_escalated = False
-        self.recovery_count = 0
-        self.consecutive_529 = 0
-        self.has_attempted_reactive_compact = False
-        self.current_model = PRIMARY_MODEL
-```
+`RecoveryState` 见 [核心抽象](#核心抽象)。
 
 指数退避：
 
@@ -385,6 +409,96 @@ def agent_loop(messages, context):
 > 3. **升级时保存截断输出**：截断内容污染 messages，下一轮模型看到自己半截的话反而困惑。
 > 4. **RecoveryState 跨会话**：每个新会话该重置，否则上次会话的"已升级"状态会让本次直接跳到 64K。
 > 5. **依赖异常类名匹配**：不同 SDK 包装层类名不一致，字符串匹配更稳但需维护兼容列表。
+
+## 代码骨架总览
+
+剥掉 CC 的十几种 reason code、流式错误处理，s11 的核心抽象只有这么多代码：
+
+```python
+# === 1. RecoveryState：跨迭代状态 ===
+class RecoveryState:
+    def __init__(self):
+        self.has_escalated = False                   # max_tokens 升级过没有
+        self.recovery_count = 0                      # 续写次数
+        self.consecutive_529 = 0                     # 连续 529（成功清零）
+        self.has_attempted_reactive_compact = False  # 压缩过没有
+        self.current_model = PRIMARY_MODEL           # 当前模型（可能切 fallback）
+
+# === 2. 指数退避 + 抖动（支持 Retry-After）===
+def retry_delay(attempt, retry_after=None):
+    if retry_after: return retry_after
+    base = min(BASE_DELAY_MS * (2 ** attempt), 32000) / 1000
+    jitter = random.uniform(0, base * 0.25)
+    return base + jitter
+
+# === 3. 错误识别（字符串匹配，跨 SDK 稳定）===
+def is_prompt_too_long_error(e):
+    msg = str(e).lower()
+    return (("prompt" in msg and "long" in msg)
+            or "prompt_is_too_long" in msg
+            or "context_length_exceeded" in msg
+            or "max_context_window" in msg)
+
+# === 4. with_retry：只处理瞬态（429/529），其他 re-raise ===
+def with_retry(fn, state):
+    for attempt in range(MAX_RETRIES):
+        try:
+            result = fn()
+            state.consecutive_529 = 0           # 成功就清零
+            return result
+        except Exception as e:
+            name = type(e).__name__; msg = str(e).lower()
+            if "ratelimit" in name.lower() or "429" in msg:
+                time.sleep(retry_delay(attempt)); continue
+            if "overloaded" in name.lower() or "529" in msg:
+                state.consecutive_529 += 1
+                if state.consecutive_529 >= MAX_CONSECUTIVE_529 and FALLBACK_MODEL:
+                    state.current_model = FALLBACK_MODEL
+                    state.consecutive_529 = 0
+                time.sleep(retry_delay(attempt)); continue
+            raise                              # 非瞬态，抛给外层
+    raise RuntimeError(f"Max retries ({MAX_RETRIES}) exceeded")
+
+# === 5. agent_loop：分层 try/except + stop_reason 分支 ===
+def agent_loop(messages, context):
+    system = get_system_prompt(context)
+    state = RecoveryState()
+    max_tokens = DEFAULT_MAX_TOKENS
+    while True:
+        try:
+            # lambda 用默认参数捕获当前 max_tokens / model（避免闭包陷阱）
+            response = with_retry(
+                lambda mt=max_tokens, mdl=state.current_model:
+                    client.messages.create(model=mdl, system=system,
+                        messages=messages, tools=TOOLS, max_tokens=mt),
+                state)
+        except Exception as e:
+            if is_prompt_too_long_error(e):
+                if not state.has_attempted_reactive_compact:
+                    messages[:] = reactive_compact(messages)
+                    state.has_attempted_reactive_compact = True
+                    continue
+            return                                # 退无可退 / 其他永久错误
+
+        # stop_reason 分支（注意：升级路径在 append 之前）
+        if response.stop_reason == "max_tokens":
+            if not state.has_escalated:
+                max_tokens = ESCALATED_MAX_TOKENS
+                state.has_escalated = True
+                continue                          # 不动 messages，原请求重发
+            messages.append({"role": "assistant", "content": response.content})
+            if state.recovery_count < MAX_RECOVERY_RETRIES:
+                messages.append({"role": "user", "content": CONTINUATION_PROMPT})
+                state.recovery_count += 1
+                continue
+            return
+
+        messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use": return
+        # 执行工具，继续循环...
+```
+
+**这 5 块构成了 s11 的全部抽象层**。这一节是 Phase 3 的收尾——Memory（持久化）+ System Prompt（运行时配置）+ Error Recovery（自我修复）三者合起来让 Agent 从"演示原型"升级成"能长跑的生产系统"。Phase 4 起会基于这套底座跑后台 / 定时 / 多 agent 任务。
 
 ## Q&A
 

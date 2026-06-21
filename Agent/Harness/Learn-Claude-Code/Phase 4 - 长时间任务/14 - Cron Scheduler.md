@@ -3,7 +3,7 @@ type: concept
 status: seed
 domain: llm-agent
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-21
 aliases:
   - cron scheduler
   - cron 调度器
@@ -21,143 +21,47 @@ tags:
 > [!note]
 > s13 让 Agent 能"派发"慢工具，但仍要用户在场触发——没人输入 Agent 就静止。s14 让**时间本身**成为触发源：用户说"每天 9 点跑日报告"，s14 起一个**独立守护线程**每秒检查时间，到点了把任务塞进队列；另一个守护线程看到队列有东西且 Agent 空闲，就**主动唤起一次 agent turn**。Agent 从"被动响应"升级为"自主醒来"。这是 Phase 4 最复杂的一课，引入了**第一个长期运行的并发架构**。
 
+## 这节重点关注
+
+读完这节，你应该能在脑子里答出这 5 个问题：
+
+1. **4 层架构**：Scheduler / Queue / Processor / Agent Loop 各负责什么？为什么不能合并？（→ [4 层架构 + 队列解耦](#4-层架构--队列解耦)）
+2. **两把锁职责**：`cron_lock` 和 `agent_lock` 分别保护什么？为什么 A 线程不碰 agent_lock？（→ [两把锁的获取点](#两把锁的获取点)）
+3. **DOM/DOW OR 语义**：Unix cron 历史包袱怎么用 if 分支实现？（→ [domdow-or-语义](#domdow-or-语义)）
+4. **双重检查锁定**：queue_processor 为什么检查队列两次？（→ [双重检查锁定double-checked-locking](#双重检查锁定double-checked-locking)）
+5. **agent_loop 改动**：s14 在循环入口前插了什么？两条调用路径怎么共享 messages？（→ [对-agent_loop-的影响](#对-agent_loop-的影响)）
+
+**可以略读/跳过**：CC 的 jitter 建议、`/loop` skill 包装、模型选择等高级特性——这些是 CC 产品级 UX 增强。**核心抽象是 4 层 + 队列 + 两把锁，CC 增强是配菜。**
+
 ## 这一步加了什么
 
-### 1. 数据结构
+| 新增 | 作用 | 重点? |
+|---|---|---|
+| `CronJob` dataclass | 5 字段：id / cron / prompt / recurring / durable | ⭐⭐⭐ |
+| `DURABLE_PATH = .scheduled_tasks.json` | durable job 持久化文件 | ⭐⭐ |
+| `scheduled_jobs` dict | 所有已注册 job | ⭐⭐ |
+| `cron_queue` list | 待投递的"已触发" job | ⭐⭐⭐ |
+| `_last_fired` dict | 每个 job 上次触发的 minute_marker（防 60 倍重复） | ⭐⭐⭐ |
+| `cron_lock` | 保护上面 3 个共享结构 | ⭐⭐ |
+| `agent_lock` | 保护 agent turn 互斥 | ⭐⭐⭐ |
+| `_validate_cron_field` / `validate_cron` | 注册时校验表达式合法性 | ⭐⭐ |
+| `_cron_field_matches` / `cron_matches` | 运行时表达式匹配 datetime | ⭐⭐⭐ |
+| `schedule_job` / `cancel_job` | 注册 / 取消 | ⭐⭐ |
+| `save_durable_jobs` / `load_durable_jobs` | 全量重写持久化 + 启动加载 | ⭐⭐ |
+| `cron_scheduler_loop` | 守护线程 A：每秒检查时间 → 入队 | ⭐⭐⭐ |
+| `queue_processor_loop` | 守护线程 B：检查队列 + 唤 agent | ⭐⭐⭐ |
+| `consume_cron_queue` / `has_cron_queue` | drain / peek 队列操作 | ⭐⭐ |
+| `run_agent_turn_locked` | 约定：调用方持 agent_lock | ⭐⭐ |
 
-- `CronJob` dataclass：5 个字段（id / cron / prompt / recurring / durable）。
-- `DURABLE_PATH = .scheduled_tasks.json`：durable job 持久化文件。
+## 演进与动机
 
-### 2. 5 个全局状态变量（关键）
+s13 的 background task 派发后，仍需要 agent_loop 在跑（主线程在 input 或在跑 turn）。如果用户关掉终端，agent 进程退出，所有工作停止。三个痛点：
 
-```python
-scheduled_jobs: dict[str, CronJob] = {}     # 所有已注册 job
-cron_queue: list[CronJob] = []              # 待投递的"已触发" job
-cron_lock = threading.Lock()                # 保护上面 3 个共享结构
-agent_lock = threading.Lock()               # 保护 agent turn 互斥
-_last_fired: dict[str, str] = {}            # 每个 job 上次触发的 minute_marker
-```
+1. **时间驱动场景必须 cron**：很多 Agent 工作是周期性或定时的——每天 9 点跑日报告、每小时检查一次部署状态、每周一回顾上周的 commit、工作日下午 5 点提醒提交。没有 cron，这些场景**必须用户在场手动触发**——违背 Agent 的"自主性"。
+2. **用户不在场也要跑**：s13 background 是 dispatch 时派发，依赖 agent_loop 跑。需要独立线程轮询时间，不依赖主线程的 input loop。需要 durable 持久化让重启后 job 不丢。
+3. **s12 + s13 解决不了**：s12 task 是用户/模型显式创建的，没有时间触发；s13 background 是 dispatch 时派发，依赖 agent_loop 跑。
 
-### 3. 9 个新函数（分 4 组）
-
-**校验组（注册时）：**
-
-| 函数 | 作用 |
-|---|---|
-| `_validate_cron_field(field, lo, hi)` | 单字段语法 + 范围检查 |
-| `validate_cron(cron_expr)` | 整条 cron 表达式合法性 |
-
-**匹配组（运行时）：**
-
-| 函数 | 作用 |
-|---|---|
-| `_cron_field_matches(field, value)` | 单字段是否匹配某值 |
-| `cron_matches(cron_expr, dt)` | 整条表达式是否匹配某 datetime |
-
-**注册组：**
-
-| 函数 | 作用 |
-|---|---|
-| `schedule_job(cron, prompt, recurring, durable)` | 注册新 job |
-| `cancel_job(job_id)` | 取消 job |
-
-**持久化组：**
-
-| 函数 | 作用 |
-|---|---|
-| `save_durable_jobs()` | 全量重写 .scheduled_tasks.json |
-| `load_durable_jobs()` | 启动时从磁盘恢复 |
-
-**调度组：**
-
-| 函数 | 作用 |
-|---|---|
-| `cron_scheduler_loop()` | 守护线程 A：每秒检查时间 |
-| `consume_cron_queue()` | agent_loop 用：取走所有触发的 job |
-| `has_cron_queue()` | queue processor 用：查队列非空 |
-
-**入口组：**
-
-| 函数 | 作用 |
-|---|---|
-| `queue_processor_loop()` | 守护线程 B：检查队列 + 唤 agent |
-| `run_agent_turn_locked()` | 加锁版的 agent turn 调用（约定：调用方持锁） |
-
-### 4. 3 个 LLM 工具
-
-`schedule_cron` / `list_crons` / `cancel_cron`。
-
-## 为什么需要加
-
-### 1. 时间驱动场景必须 cron
-
-很多 Agent 工作是"**周期性**"或"**定时**"的：
-
-- 每天早上 9 点跑日报告。
-- 每小时检查一次部署状态。
-- 每周一回顾上周的 commit。
-- 工作日下午 5 点提醒提交。
-
-没有 cron，这些场景**必须用户在场手动触发**——违背 Agent 的"自主性"。
-
-### 2. 用户不在场也要跑
-
-s13 的 background task 派发后，仍需要 agent_loop 在跑（主线程在 input 或在跑 turn）。如果用户关掉终端，agent 进程退出，所有工作停止。
-
-cron 需要：
-
-- **独立线程**轮询时间，不依赖主线程的 input loop。
-- **durable 持久化**让重启后 job 不丢。
-
-### 3. s12 + s13 解决不了
-
-- s12 task 是用户/模型显式创建的，没有时间触发。
-- s13 background 是 dispatch 时派发，依赖 agent_loop 跑。
-
-需要 s14 的"**时间 → 自动注入任务**"机制。
-
-## 这是一个什么机制
-
-### 4 层架构 + 队列解耦
-
-```mermaid
-%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
-flowchart TB
-    subgraph L1["第 1 层：Scheduler 守护线程"]
-        S1["cron_scheduler_loop<br/>每秒醒<br/>判时间 → 入队"]
-    end
-
-    subgraph L2["第 2 层：Queue"]
-        Q1["cron_queue<br/>解耦<br/>scheduler 和 agent"]
-    end
-
-    subgraph L3["第 3 层：Queue Processor 守护线程"]
-        QP1["queue_processor_loop<br/>每 0.2 秒醒<br/>队列非空 + 锁空闲 → 唤 agent"]
-    end
-
-    subgraph L4["第 4 层：Agent Loop（主线程）"]
-        A1["agent_loop<br/>开头 consume_cron_queue<br/>注入 user 消息"]
-    end
-
-    S1 -->|"append"| Q1
-    S1 -.->|"读写"| SJ["scheduled_jobs<br/>_last_fired"]
-    S1 -.->|"one-shot 自毁"| Disk[(".scheduled_tasks.json")]
-    Q1 -->|"检查"| QP1
-    QP1 -.->|"acquire"| AL["agent_lock"]
-    QP1 -->|"调用"| A1
-    A1 -->|"consume"| Q1
-
-    style L1 fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style L2 fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style L3 fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style L4 fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
-    style SJ fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
-    style AL fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
-```
-
-### 为什么分 4 层
-
-如果只有 1 层（直接在 scheduler 里调 agent）：
+**反例**：如果只有 1 层（直接在 scheduler 里调 agent）：
 
 ```
 scheduler: "时间到了！" → agent_loop(messages)
@@ -169,7 +73,102 @@ scheduler: "时间到了！" → agent_loop(messages)
          其他 job 错过触发时机
 ```
 
-**分层的本质是解耦时间检查和 agent 执行**：
+**解法核心**：分 4 层把"时间检查"和"agent 执行"解耦——Scheduler 极快（毫秒级判时间入队）、Queue 缓冲、Processor 极快（0.2 秒判时机）、Agent 慢（数秒~数十秒真正干活）。慢的 agent 卡不到快的 scheduler。
+
+**产品需求**：cron 触发的 turn 内部把 prompt 翻译成一条新的 user message（`[Scheduled] {prompt}`），agent 完全不知道有 cron，它只看到一条新的 user 消息。
+
+## 核心抽象
+
+### CronJob dataclass
+
+```python
+@dataclass
+class CronJob:
+    id: str                # f"cron_{timestamp}_{random}"
+    cron: str              # "0 9 * * *"（5 字段：minute hour dom month dow）
+    prompt: str            # 触发时要喂给 agent 的 prompt
+    recurring: bool        # True = 重复 / False = 一次性（触发即自毁）
+    durable: bool          # True = 持久化到磁盘 / False = 进程死即消失
+```
+
+### 全局状态（3 个共享结构 + 2 把锁）
+
+```python
+scheduled_jobs: dict[str, CronJob] = {}   # 所有已注册 job
+cron_queue: list[CronJob] = []            # 待投递的"已触发" job
+cron_lock = threading.Lock()              # 保护上面 3 个共享结构
+agent_lock = threading.Lock()             # 保护 agent turn 互斥
+_last_fired: dict[str, str] = {}          # 每个 job 上次触发的 minute_marker
+```
+
+### 关键函数契约
+
+- `cron_matches(cron_expr, dt) -> bool`：表达式是否匹配某 datetime（含 DOM/DOW OR 语义）
+- `consume_cron_queue() -> list[CronJob]`：原子"取走全部并清空"（drain）
+- `has_cron_queue() -> bool`：只读检查队列非空（peek）
+- `run_agent_turn_locked(user_query=None)`：**约定：调用方必须已持 agent_lock**
+
+## 整体架构图
+
+```mermaid
+%%{init: {"theme":"base", "themeVariables": {
+  "fontSize":"16px",
+  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  "background":"#ffffff",
+  "primaryColor":"#eff6ff",
+  "primaryBorderColor":"#60a5fa",
+  "primaryTextColor":"#0f172a",
+  "lineColor":"#94a3b8"
+}}}%%
+flowchart TB
+    subgraph L1["第 1 层：Scheduler 守护线程"]
+        S1["<b>cron_scheduler_loop</b><br/>每秒醒<br/>判时间 → 入队"]
+    end
+
+    subgraph L2["第 2 层：Queue"]
+        Q1["<b>cron_queue</b><br/>解耦<br/>scheduler 和 agent"]
+    end
+
+    subgraph L3["第 3 层：Queue Processor 守护线程"]
+        QP1["<b>queue_processor_loop</b><br/>每 0.2 秒醒<br/>队列非空 + 锁空闲 → 唤 agent"]
+    end
+
+    subgraph L4["第 4 层：Agent Loop（主线程）"]
+        A1["<b>agent_loop</b><br/>开头 consume_cron_queue<br/>注入 user 消息"]
+    end
+
+    SJ["<b>scheduled_jobs</b><br/>_last_fired"]
+    Disk[("<b>.scheduled_tasks.json</b>")]
+    AL["<b>agent_lock</b>"]
+
+    S1 -->|"append"| Q1
+    S1 -.->|"读写"| SJ
+    S1 -.->|"one-shot 自毁"| Disk
+    Q1 -->|"检查"| QP1
+    QP1 -.->|"acquire"| AL
+    QP1 -->|"调用"| A1
+    A1 -->|"consume"| Q1
+
+    class S1,QP1 core
+    class Q1 data
+    class A1 mech
+    class SJ data
+    class Disk persist
+    class AL mech
+
+    classDef core fill:#fef3c7,stroke:#d97706,stroke-width:3px,color:#78350f
+    classDef mech fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a
+    classDef data fill:#fce7f3,stroke:#db2777,stroke-width:2px,color:#831843
+    classDef external fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef persist fill:#e0e7ff,stroke:#6366f1,stroke-width:2px,color:#312e81
+    classDef decision fill:#fef9c3,stroke:#eab308,stroke-width:2px,color:#713f12
+    classDef warn fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
+    classDef terminal fill:#f3f4f6,stroke:#6b7280,stroke-width:1.5px,color:#1f2937
+```
+
+## 4 层架构 + 队列解耦
+
+如果只有 1 层（直接在 scheduler 里调 agent），慢的 agent 会卡住 scheduler，其他 job 错过触发时机。**分层的本质是解耦时间检查和 agent 执行**：
 
 | 层 | 速度 | 职责 |
 |---|---|---|
@@ -180,7 +179,7 @@ scheduler: "时间到了！" → agent_loop(messages)
 
 慢的 agent 卡不到快的 scheduler——这是分层最核心的收益。
 
-### DOM/DOW OR 语义
+## DOM/DOW OR 语义
 
 Unix cron 的历史包袱：如果 day-of-month 和 day-of-week 都被指定（不是 `*`），**只要一个匹配就算命中**。
 
@@ -202,7 +201,7 @@ if dow_unconstrained:
 return dom_ok or dow_ok  # 都限 → OR
 ```
 
-### 双重检查锁定（Double-Checked Locking）
+## 双重检查锁定（Double-Checked Locking）
 
 queue processor 检查队列两次：
 
@@ -227,12 +226,7 @@ CC 有非常成熟的 cron 系统，骨架跟 s14 一样，但功能多很多。
 
 ### 1. 类似的 4 层架构
 
-CC 的实现也是：
-
-- Scheduler 线程（或 libuv timer）检查时间。
-- Queue 缓冲。
-- Queue processor 唤起主流程。
-- 主流程把 prompt 当用户输入注入。
+CC 的实现也是：Scheduler 线程（或 libuv timer）检查时间 → Queue 缓冲 → Queue processor 唤起主流程 → 主流程把 prompt 当用户输入注入。
 
 ### 2. Jitter：避免 :00 拥堵
 
@@ -250,54 +244,57 @@ CC 把 cron 包装成一个 **skill**：用户说"/loop every 5 minutes check X"
 
 ### 4. 更多调度选项
 
-CC 的 cron 支持：
+CC 的 cron 支持：一次性任务（recurring=False）、自定义模型（用 haiku 跑 cron 触发的 turn 省钱）、跨会话存活（durable）、用户可列出/取消/暂停。s14 教学版覆盖了核心（recurring + durable + cancel），但没暴露模型选择等高级特性。
 
-- 一次性任务（recurring=False）。
-- 自定义模型（用 haiku 跑 cron 触发的 turn 省钱）。
-- 跨会话存活（durable）。
-- 用户可列出/取消/暂停。
-
-s14 教学版覆盖了核心（recurring + durable + cancel），但没暴露模型选择等高级特性。
-
-## 整体逻辑：函数之间的关系
+## 整体函数关系图
 
 ```mermaid
-%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
+%%{init: {"theme":"base", "themeVariables": {
+  "fontSize":"16px",
+  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  "background":"#ffffff",
+  "primaryColor":"#eff6ff",
+  "primaryBorderColor":"#60a5fa",
+  "primaryTextColor":"#0f172a",
+  "lineColor":"#94a3b8"
+}}}%%
 flowchart TB
     subgraph Tools["LLM 可调工具"]
-        T1["run_schedule_cron"]
-        T2["run_list_crons"]
-        T3["run_cancel_cron"]
+        T1["<b>run_schedule_cron</b>"]
+        T2["<b>run_list_crons</b>"]
+        T3["<b>run_cancel_cron</b>"]
     end
 
     subgraph Registration["注册 / 取消"]
-        R1["schedule_job"]
-        R2["cancel_job"]
-        R3["validate_cron<br/>表达式合法性"]
-        R4["_validate_cron_field<br/>单字段合法性"]
+        R1["<b>schedule_job</b>"]
+        R2["<b>cancel_job</b>"]
+        R3["<b>validate_cron</b>"]
+        R4["<b>_validate_cron_field</b>"]
     end
 
     subgraph Persistence["磁盘读写"]
-        P1["save_durable_jobs<br/>全量重写"]
-        P2["load_durable_jobs<br/>启动时加载"]
+        P1["<b>save_durable_jobs</b>"]
+        P2["<b>load_durable_jobs</b>"]
     end
 
     subgraph Scheduler["调度（时间→队列）"]
-        S1["cron_scheduler_loop<br/>守护线程 A<br/>每秒轮询"]
-        S2["cron_matches<br/>表达式匹配 datetime"]
-        S3["_cron_field_matches<br/>单字段匹配值"]
+        S1["<b>cron_scheduler_loop</b><br/>守护线程 A"]
+        S2["<b>cron_matches</b>"]
+        S3["<b>_cron_field_matches</b>"]
     end
 
     subgraph Queue["队列操作"]
-        Q1["consume_cron_queue<br/>agent_loop 用：drain 全部"]
-        Q2["has_cron_queue<br/>queue processor 用：bool"]
+        Q1["<b>consume_cron_queue</b><br/>drain"]
+        Q2["<b>has_cron_queue</b><br/>peek"]
     end
 
     subgraph Agent["agent 集成"]
-        A1["agent_loop<br/>开头 consume → 注入消息"]
-        A2["queue_processor_loop<br/>守护线程 B<br/>空闲时唤醒 agent"]
-        A3["run_agent_turn_locked<br/>约定：调用方持 agent_lock"]
+        A1["<b>agent_loop</b>"]
+        A2["<b>queue_processor_loop</b><br/>守护线程 B"]
+        A3["<b>run_agent_turn_locked</b>"]
     end
+
+    LF["<b>_last_fired</b>"]
 
     T1 --> R1
     T3 --> R2
@@ -309,18 +306,24 @@ flowchart TB
     S1 --> S2 --> S3
     S1 -->|"入队后 agent 消费"| Q1
     S1 --> P1
-    S1 -.->|"写"| LF["_last_fired"]
+    S1 -.->|"写"| LF
 
     A1 --> Q1
     A2 --> Q2
     A2 --> A3 --> A1
 
-    style Tools fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
-    style Registration fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style Persistence fill:#e0e7ff,stroke:#4338ca,stroke-width:2.5px,color:#312e81
-    style Scheduler fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style Queue fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
-    style Agent fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
+    class T1,T2,T3 external
+    class R1,R2,R3,R4,P1,P2,S1,S2,S3,Q1,Q2,A1,A2,A3 mech
+    class LF data
+
+    classDef core fill:#fef3c7,stroke:#d97706,stroke-width:3px,color:#78350f
+    classDef mech fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a
+    classDef data fill:#fce7f3,stroke:#db2777,stroke-width:2px,color:#831843
+    classDef external fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef persist fill:#e0e7ff,stroke:#6366f1,stroke-width:2px,color:#312e81
+    classDef decision fill:#fef9c3,stroke:#eab308,stroke-width:2px,color:#713f12
+    classDef warn fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
+    classDef terminal fill:#f3f4f6,stroke:#6b7280,stroke-width:1.5px,color:#1f2937
 ```
 
 ### 调用关系详解
@@ -353,7 +356,6 @@ flowchart TB
          ↓
          with cron_lock:
              for job in list(scheduled_jobs.values()):
-                 ↓
                  if cron_matches(job.cron, now):
                      if _last_fired[job.id] != minute_marker:
                          cron_queue.append(job)
@@ -468,38 +470,45 @@ def queue_processor_loop():
 s14 是 Phase 4 引入最多并发的一课。**三个长期线程** + s13 的临时 daemon。
 
 ```mermaid
-%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
+%%{init: {"theme":"base", "themeVariables": {
+  "fontSize":"16px",
+  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  "background":"#ffffff",
+  "primaryColor":"#eff6ff",
+  "primaryBorderColor":"#60a5fa",
+  "primaryTextColor":"#0f172a",
+  "lineColor":"#94a3b8"
+}}}%%
 flowchart TB
     subgraph Main["主线程（永久）"]
-        M1["input loop<br/>等用户输入"]
-        M2["with agent_lock:<br/>run_agent_turn_locked"]
+        M1["<b>input loop</b><br/>等用户输入"]
+        M2["<b>with agent_lock:</b><br/>run_agent_turn_locked"]
         M1 --> M2
     end
 
     subgraph Scheduler["守护线程 A：cron_scheduler_loop（永久）"]
-        S1["每 1 秒醒<br/>检查时间"]
-        S2["with cron_lock:<br/>遍历 scheduled_jobs"]
-        S3["时间到了 → cron_queue.append"]
+        S1["<b>每 1 秒醒</b><br/>检查时间"]
+        S2["<b>with cron_lock:</b><br/>遍历 scheduled_jobs"]
+        S3["<b>时间到了</b><br/>→ cron_queue.append"]
         S1 --> S2 --> S3
     end
 
     subgraph Processor["守护线程 B：queue_processor_loop（永久）"]
-        Q1["每 0.2 秒醒"]
-        Q2["has_cron_queue?"]
-        Q3["agent_lock.acquire(blocking=False)?"]
-        Q4["run_agent_turn_locked"]
+        Q1["<b>每 0.2 秒醒</b>"]
+        Q2{"<b>has_cron_queue?</b>"}
+        Q3{"<b>agent_lock<br/>非阻塞?</b>"}
+        Q4["<b>run_agent_turn_locked</b>"]
         Q1 --> Q2 --> Q3 --> Q4
     end
 
     subgraph Daemon["临时 daemon threads（继承 s13）"]
-        D1["bg_001 worker"]
-        D2["bg_002 worker"]
+        D1["<b>bg_001 worker</b>"]
+        D2["<b>bg_002 worker</b>"]
     end
 
-    Shared["共享状态"]
-    SJ["scheduled_jobs<br/>cron_queue<br/>_last_fired"]
-    AL["agent_lock"]
-    CL["cron_lock"]
+    SJ["<b>scheduled_jobs</b><br/>cron_queue<br/>_last_fired"]
+    AL["<b>agent_lock</b>"]
+    CL["<b>cron_lock</b>"]
 
     S2 -.-> CL
     Q2 -.-> CL
@@ -510,12 +519,20 @@ flowchart TB
     M2 -->|"派发慢工具"| D1
     M2 -->|"派发慢工具"| D2
 
-    style Main fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style Scheduler fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style Processor fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style Daemon fill:#fef3c7,stroke:#b45309,stroke-width:3px,color:#451a03
-    style AL fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
-    style CL fill:#fce7f3,stroke:#be185d,stroke-width:2.5px,color:#831843
+    class M1,M2,S1,S2,S3,Q1,Q4 core
+    class Q2,Q3 decision
+    class D1,D2 mech
+    class SJ data
+    class AL,CL mech
+
+    classDef core fill:#fef3c7,stroke:#d97706,stroke-width:3px,color:#78350f
+    classDef mech fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a
+    classDef data fill:#fce7f3,stroke:#db2777,stroke-width:2px,color:#831843
+    classDef external fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef persist fill:#e0e7ff,stroke:#6366f1,stroke-width:2px,color:#312e81
+    classDef decision fill:#fef9c3,stroke:#eab308,stroke-width:2px,color:#713f12
+    classDef warn fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
+    classDef terminal fill:#f3f4f6,stroke:#6b7280,stroke-width:1.5px,color:#1f2937
 ```
 
 ### 三个长期线程的职责矩阵
@@ -702,108 +719,12 @@ threading.Thread(target=cron_scheduler_loop, daemon=True).start()
 
 避免死锁的设计——所有锁顺序固定为 `cron_lock → agent_lock`（如果都要拿的话），从不反向。
 
-## 实现对照（s14/code.py）
+### 9. 校验和匹配分离
 
-### 启动流程
+- `_validate_cron_field` / `validate_cron`：注册时**校验**合法性，一辈子只调一次，可以慢但必须严。
+- `_cron_field_matches` / `cron_matches`：运行时**匹配**，调度线程每秒跑 100+ 次，必须轻量。
 
-```python
-# 模块加载时执行
-load_durable_jobs()                                     # 从磁盘恢复 job
-threading.Thread(target=cron_scheduler_loop, daemon=True).start()  # 起线程 A
-print("  [cron] scheduler thread started")
-
-# __main__ 里
-if __name__ == "__main__":
-    ...
-    threading.Thread(target=queue_processor_loop, daemon=True).start()  # 起线程 B
-    while True:
-        query = input("s14 >> ")
-        ...
-        with agent_lock:
-            run_agent_turn_locked(query)
-```
-
-启动顺序有意义：
-
-1. **先 load**：注册表填好再起 scheduler。如果反过来，scheduler 起来时注册表是空的，磁盘上的 job 不会被恢复。
-2. **scheduler 先于 queue processor**：队列里有东西得先有人放。
-
-### cron 匹配
-
-```python
-def _cron_field_matches(field: str, value: int) -> bool:
-    if field == "*":
-        return True
-    if field.startswith("*/"):
-        step = int(field[2:])
-        return step > 0 and value % step == 0
-    if "," in field:
-        return any(_cron_field_matches(f.strip(), value) for f in field.split(","))
-    if "-" in field:
-        lo, hi = field.split("-", 1)
-        return int(lo) <= value <= int(hi)
-    return value == int(field)
-
-def cron_matches(cron_expr: str, dt: datetime) -> bool:
-    fields = cron_expr.strip().split()
-    if len(fields) != 5:
-        return False
-    minute, hour, dom, month, dow = fields
-    dow_val = (dt.weekday() + 1) % 7  # Python Monday=0 → cron Sunday=0
-
-    m = _cron_field_matches(minute, dt.minute)
-    h = _cron_field_matches(hour, dt.hour)
-    dom_ok = _cron_field_matches(dom, dt.day)
-    month_ok = _cron_field_matches(month, dt.month)
-    dow_ok = _cron_field_matches(dow, dow_val)
-
-    if not (m and h and month_ok):
-        return False
-    dom_unconstrained = dom == "*"
-    dow_unconstrained = dow == "*"
-    if dom_unconstrained and dow_unconstrained:
-        return True
-    if dom_unconstrained:
-        return dow_ok
-    if dow_unconstrained:
-        return dom_ok
-    return dom_ok or dow_ok
-```
-
-`_cron_field_matches` 处理 5 种 cron 语法：`*`、`*/N`、`a,b,c`、`a-b`、`N`。逗号用递归支持嵌套（`"1-3,*/2,10"`）。
-
-### 消费队列
-
-```python
-def consume_cron_queue() -> list[CronJob]:
-    """Consume fired jobs from cron_queue (called by agent_loop)."""
-    with cron_lock:
-        fired = list(cron_queue)   # 复制
-        cron_queue.clear()         # 清空
-    return fired
-```
-
-**原子"取走全部并清空"**——这是 consume（消费）语义。复制一份让调用方在锁外安全遍历。
-
-### queue_processor 双重检查
-
-```python
-def queue_processor_loop():
-    global session_context
-    while True:
-        time.sleep(0.2)
-        if not has_cron_queue():
-            continue
-        if not agent_lock.acquire(blocking=False):
-            continue
-        try:
-            if not has_cron_queue():
-                continue
-            print("  [queue processor] delivering scheduled work")
-            run_agent_turn_locked()
-        finally:
-            agent_lock.release()
-```
+入口校验 + 热路径快的常见分工。
 
 ## 相关概念
 
@@ -822,6 +743,151 @@ def queue_processor_loop():
 > 4. **以为 one-shot 任务会自动重复执行**。不会。触发后立刻 `scheduled_jobs.pop` 自毁。
 > 5. **持久化文件不是原子写**：`write_text` 中途进程崩会留半个 JSON。生产实现要用 `tmp.replace(path)` 原子替换。
 > 6. **以为 cron 触发会"立即"唤 agent**。不会。要等 queue_processor 下一次 0.2 秒检查 + agent_lock 空闲，最坏延迟 = 0.2 秒 + 主线程跑完。
+
+## 代码骨架总览
+
+剥掉 cron 5 字段校验细节和工具 schema，s14 的核心抽象层只有这么多代码：
+
+```python
+# === 1. 数据结构 + 全局状态（3 共享结构 + 2 把锁）===
+import threading, time, json, random
+from datetime import datetime
+from dataclasses import dataclass, asdict
+
+@dataclass
+class CronJob:
+    id: str
+    cron: str            # "0 9 * * *"
+    prompt: str
+    recurring: bool
+    durable: bool
+
+scheduled_jobs: dict[str, CronJob] = {}
+cron_queue: list[CronJob] = []
+_last_fired: dict[str, str] = {}
+cron_lock = threading.Lock()        # 保护上面 3 个共享结构
+agent_lock = threading.Lock()       # 保护 agent turn 互斥
+DURABLE_PATH = Path(".scheduled_tasks.json")
+
+# === 2. cron 匹配（含 DOM/DOW OR 语义）===
+def _cron_field_matches(field: str, value: int) -> bool:
+    if field == "*": return True
+    if field.startswith("*/"):
+        step = int(field[2:]); return step > 0 and value % step == 0
+    if "," in field:
+        return any(_cron_field_matches(f.strip(), value) for f in field.split(","))
+    if "-" in field:
+        lo, hi = field.split("-", 1); return int(lo) <= value <= int(hi)
+    return value == int(field)
+
+def cron_matches(cron_expr: str, dt: datetime) -> bool:
+    fields = cron_expr.strip().split()
+    if len(fields) != 5: return False
+    minute, hour, dom, month, dow = fields
+    dow_val = (dt.weekday() + 1) % 7   # Python Monday=0 → cron Sunday=0
+    if not (_cron_field_matches(minute, dt.minute)
+            and _cron_field_matches(hour, dt.hour)
+            and _cron_field_matches(month, dt.month)):
+        return False
+    dom_ok = _cron_field_matches(dom, dt.day)
+    dow_ok = _cron_field_matches(dow, dow_val)
+    dom_unc, dow_unc = dom == "*", dow == "*"
+    if dom_unc and dow_unc: return True
+    if dom_unc: return dow_ok
+    if dow_unc: return dom_ok
+    return dom_ok or dow_ok          # Unix OR 语义
+
+# === 3. 持久化（全量重写 + 启动加载）===
+def save_durable_jobs():
+    durable = [asdict(j) for j in scheduled_jobs.values() if j.durable]
+    DURABLE_PATH.write_text(json.dumps(durable, indent=2))
+
+def load_durable_jobs():
+    if not DURABLE_PATH.exists(): return
+    for d in json.loads(DURABLE_PATH.read_text()):
+        job = CronJob(**d)
+        scheduled_jobs[job.id] = job
+
+# === 4. 守护线程 A：每秒判时间 → 入队 ===
+def cron_scheduler_loop():
+    while True:
+        time.sleep(1)
+        now = datetime.now()
+        minute_marker = now.strftime("%Y-%m-%d %H:%M")  # 带日期防跨天漏触发
+        with cron_lock:
+            for job in list(scheduled_jobs.values()):
+                try:
+                    if not cron_matches(job.cron, now):
+                        continue
+                    if _last_fired.get(job.id) != minute_marker:  # 防每分钟 60 倍重复
+                        cron_queue.append(job)
+                        _last_fired[job.id] = minute_marker
+                    if not job.recurring:                  # one-shot 触发即自毁
+                        scheduled_jobs.pop(job.id, None)
+                        if job.durable: save_durable_jobs()
+                except Exception as e:
+                    print(f"  [cron error] {job.id}: {e}")
+
+# === 5. 守护线程 B：每 0.2 秒判时机 + 唤 agent ===
+def queue_processor_loop():
+    while True:
+        time.sleep(0.2)
+        if not has_cron_queue():                          # Check 1（锁外，性能）
+            continue
+        if not agent_lock.acquire(blocking=False):        # 非阻塞
+            continue
+        try:
+            if not has_cron_queue():                      # Check 2（锁内，正确性）
+                continue
+            run_agent_turn_locked()                       # 约定：调用方持锁
+        finally:
+            agent_lock.release()
+
+def has_cron_queue() -> bool:
+    with cron_lock:
+        return bool(cron_queue)
+
+def consume_cron_queue() -> list[CronJob]:
+    with cron_lock:
+        fired = list(cron_queue)     # 复制
+        cron_queue.clear()           # consume 语义
+    return fired
+
+# === 6. agent_loop：入口前 consume + 两条调用路径共享 messages ===
+def run_agent_turn_locked(user_query=None):
+    """Caller must hold agent_lock."""
+    if user_query:
+        session_history.append({"role": "user", "content": user_query})
+    agent_loop(session_history, session_context)
+
+def agent_loop(messages, context):
+    while True:
+        # s14 改动：入口前消费 cron 队列
+        fired = consume_cron_queue()
+        for job in fired:
+            messages.append({"role": "user",
+                             "content": f"[Scheduled] {job.prompt}"})
+
+        response = client.messages.create(model=MODEL_ID, system=SYSTEM_PROMPT,
+                                          tools=TOOLS, messages=messages)
+        messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use":
+            return
+        # dispatch（继承 s13 的后台分支）...
+
+# === 7. 启动顺序（load → 起 scheduler → 起 processor → main loop）===
+load_durable_jobs()
+threading.Thread(target=cron_scheduler_loop, daemon=True).start()   # 守护线程 A
+threading.Thread(target=queue_processor_loop, daemon=True).start()  # 守护线程 B
+
+def main_loop():
+    while True:
+        query = input("s14 >> ")
+        with agent_lock:                      # 阻塞加锁
+            run_agent_turn_locked(query)
+```
+
+**这 7 块是 s14 的全部抽象层**。`schedule_job` / `cancel_job` / `validate_cron` 等业务函数和 3 个 LLM 工具的薄包装省略——它们只是参数解包 + 调内部 + 格式化输出。Phase 4 到此结束：s12 任务持久化 + s13 后台派发 + s14 时间驱动，三层叠起来构成"长任务完整执行模型"。
 
 ## Q&A
 
@@ -861,8 +927,8 @@ threading.Thread(target=cron_scheduler_loop, daemon=True).start()   # ← 这里
 
 | 锁 | 线程 A 用 | 线程 B 用 | 主线程用 |
 |---|---|---|---|
-| `cron_lock` | ✅（每秒拿） | ✅（每次查队列时拿） | ❌ |
-| `agent_lock` | ❌ | ✅（非阻塞 try） | ✅（阻塞 wait） |
+| `cron_lock` | 是（每秒拿） | 是（每次查队列时拿） | 否 |
+| `agent_lock` | 否 | 是（非阻塞 try） | 是（阻塞 wait） |
 
 `agent_lock` 在 s14 里**只出现两次**：
 
@@ -872,16 +938,14 @@ threading.Thread(target=cron_scheduler_loop, daemon=True).start()   # ← 这里
 while True:
     query = input("s14 >> ")
     ...
-    with agent_lock:                  # ← 这里
+    with agent_lock:                  # ← 阻塞等
         run_agent_turn_locked(query)
 ```
-
-`with` 会**阻塞等待锁**。如果 B 正在跑 agent turn，用户输入会卡在这里排队。
 
 **加锁点 2：线程 B 检查到队列有任务时（非阻塞加锁）**
 
 ```python
-if not agent_lock.acquire(blocking=False):   # ← 这里
+if not agent_lock.acquire(blocking=False):   # ← 拿不到立刻返回
     continue
 try:
     ...
@@ -890,16 +954,9 @@ finally:
     agent_lock.release()
 ```
 
-`blocking=False` 拿不到立刻返回，不等。
-
 **为什么 A 不需要 agent_lock**：A 的职责是"判时间、入队"，是个几毫秒的纯内存操作，不涉及 agent。如果 A 也调 agent_lock，反而坏事——A 没活干，拿锁只是浪费。
 
-**为什么 B 同时需要两把锁**：B 的工作是"判断时机 + 唤醒 agent"，所以它得碰两个领域：
-
-- `cron_lock`：通过 `has_cron_queue()` 看队列是否非空。
-- `agent_lock`：判断/获取"现在能不能跑 agent"的通行证。
-
-但 B **不会同时持有两把锁**——避免死锁。
+**为什么 B 同时需要两把锁**：B 的工作是"判断时机 + 唤醒 agent"，所以它得碰两个领域：`cron_lock`（通过 `has_cron_queue()` 看队列是否非空）+ `agent_lock`（判断/获取"现在能不能跑 agent"的通行证）。但 B **不会同时持有两把锁**——避免死锁。
 
 ### Q3: consume_cron_queue 这个函数有什么作用
 
@@ -919,42 +976,18 @@ def consume_cron_queue() -> list[CronJob]:
 2. **`cron_queue.clear()` 清空**：取出 = 删除（consume 语义，不是 peek）。如果只读不清空，下次 agent_loop 又会读到同一批 job，重复处理。
 3. **`with cron_lock` 整体原子**：复制 + 清空必须在同一把锁里。否则竞态：复制后、清空前，scheduler 入队了 job_D，clear 把它也清掉，永远丢失。
 
-调用点是 `agent_loop` 开头：
-
-```python
-fired = consume_cron_queue()
-for job in fired:
-    messages.append({"role": "user",
-                     "content": f"[Scheduled] {job.prompt}"})
-```
-
 跟 `has_cron_queue` 对比：
 
 | 函数 | 语义 | 返回 | 是否修改队列 |
 |---|---|---|---|
-| `has_cron_queue()` | **peek** | bool | ❌ 只读 |
-| `consume_cron_queue()` | **drain** | list[CronJob] | ✅ 取走并清空 |
+| `has_cron_queue()` | **peek** | bool | 否（只读） |
+| `consume_cron_queue()` | **drain** | list[CronJob] | 是（取走并清空） |
 
-`has_cron_queue` 给 queue processor 用——它只想知道"有没有活"，不想拿走。
-
-`consume_cron_queue` 给 agent_loop 用——它确定要处理这些 job 了，一次性取走。
+`has_cron_queue` 给 queue processor 用——它只想知道"有没有活"，不想拿走。`consume_cron_queue` 给 agent_loop 用——它确定要处理这些 job 了，一次性取走。
 
 ### Q4: queue_processor_loop 为什么检查两次队列
 
 **A**：经典 **Double-Checked Locking**，防 TOCTOU 竞态。
-
-```python
-if not has_cron_queue():              # Check 1: 值得拿锁吗？
-    continue
-if not agent_lock.acquire(blocking=False):  # 拿锁
-    continue
-try:
-    if not has_cron_queue():          # Check 2: 拿到锁后，队列还在吗？
-        continue
-    run_agent_turn_locked()
-finally:
-    agent_lock.release()
-```
 
 **Check 1 的作用：避免无谓地抢锁**。如果队列空，根本不该触发 agent turn。`agent_lock` 经常被主线程（用户输入）持有——空队列还去 acquire 会徒增锁竞争。
 
@@ -993,26 +1026,9 @@ def save_durable_jobs():
     DURABLE_PATH.write_text(json.dumps(durable, indent=2))
 ```
 
-**步骤 1：筛选 + 转换**
+**步骤 1：筛选 + 转换**。`if j.durable` 过滤——只持久化 durable 的（session job 随进程死掉就该消失）。`asdict(j)` 把 CronJob dataclass 转成 dict（`json.dumps` 不认识 dataclass，必须转）。
 
-```python
-durable = [asdict(j) for j in scheduled_jobs.values() if j.durable]
-```
-
-两件事：
-
-1. **`if j.durable` 过滤**：内存里有 durable=True 和 durable=False 两种 job，**只持久化 durable 的**。session job（durable=False）随进程死掉就该消失。
-2. **`asdict(j)` 转换**：把 CronJob dataclass 转成 dict。因为 `json.dumps` 不认识 dataclass，必须转。
-
-**步骤 2：序列化 + 写盘**
-
-```python
-DURABLE_PATH.write_text(json.dumps(durable, indent=2))
-```
-
-`indent=2` 让文件可读 + git diff 友好（每次注册新 job 只改一处，不挤成一行）。
-
-**全量重写**（不是增量）——每次注册/取消/自毁都把所有 durable jobs 全部重写。简单可靠，对小数据量（几十几百个 job）完全够用。
+**步骤 2：序列化 + 写盘**。`indent=2` 让文件可读 + git diff 友好。**全量重写**（不是增量）——每次注册/取消/自毁都把所有 durable jobs 全部重写，简单可靠。
 
 **几个没做但生产可能要做的事**：
 
@@ -1035,16 +1051,9 @@ if cron_matches(job.cron, now):
 
 **A**：处理"什么时候触发一个 cron job"。三个动作：
 
-```python
-if cron_matches(job.cron, now):                     # ① 时间匹配吗
-    if _last_fired.get(job.id) != minute_marker:    # ② 这分钟触发过了吗
-        cron_queue.append(job)                      # ③a 入队
-        _last_fired[job.id] = minute_marker         # ③b 标记
-    if not job.recurring:                            # ④ 一次性任务吗
-        scheduled_jobs.pop(job.id, None)             # ⑤a 从注册表移除
-        if job.durable:
-            save_durable_jobs()                      # ⑤b 同步磁盘
-```
+1. **时间匹配吗**：`cron_matches(job.cron, now)`
+2. **这分钟触发过了吗**：`_last_fired.get(job.id) != minute_marker`——没触发过则入队 + 标记。
+3. **一次性任务吗**：`not job.recurring`——是则从注册表移除 + 同步磁盘。
 
 **为什么需要 `_last_fired` 去重**：调度线程每秒轮询，一个 minute 内会被检查 60 次。没有去重的话，9:00 这一分钟 cron `"0 9 * * *"` 会被触发 60 次。
 
@@ -1077,12 +1086,7 @@ if cron_matches(job.cron, now):                     # ① 时间匹配吗
 
 逗号那条用**递归**很巧妙：`"1,3,5"` 拆成 `["1", "3", "5"]`，每个再调自己，支持嵌套 `"1-3,*/2,10"`。
 
-**两套函数为什么不合并**：
-
-- **匹配函数**：输入已校验过，只关心"是否匹配"，**快**（不重新检查边界）。
-- **校验函数**：输入未知，**严格**（每分支都检查），但只在注册时调一次。
-
-调度线程每秒跑匹配函数 100+ 次，必须轻量；校验函数一辈子只跑一次，可以慢但必须严。**入口校验 + 热路径快**的常见分工。
+**两套函数为什么不合并**：匹配函数输入已校验过，只关心"是否匹配"，快（不重新检查边界）；校验函数输入未知，严格（每分支都检查），但只在注册时调一次。**入口校验 + 热路径快**的常见分工。
 
 ### Q8: session_context 大概是什么内容，是 system_prompt 那些字段吗
 
@@ -1099,9 +1103,7 @@ def update_context(context, messages):
     }
 ```
 
-`session_context` 就是这么个 dict，三个 key。
-
-而 `PROMPT_SECTIONS` 是**静态的 prompt 片段**：
+`session_context` 就是这么个 dict，三个 key。而 `PROMPT_SECTIONS` 是**静态的 prompt 片段**：
 
 ```python
 PROMPT_SECTIONS = {
@@ -1195,8 +1197,4 @@ s14 在循环里包了 try/except——单个 job 处理抛异常被 catch，不
 
 所以 s14 的设计是：**durable job 跨重启存活，session job 随进程消失，正在跑的 turn 重启后从头来**。
 
-生产实现会进一步：
-
-- 把 task 状态（s12 的 task system）也持久化，让 turn 内的工作跨重启恢复。
-- 把"正在执行的 prompt"记录到磁盘，重启后从断点继续。
-- CC 的 `/loop` 命令有更复杂的恢复机制。
+生产实现会进一步：把 task 状态（s12 的 task system）也持久化，让 turn 内的工作跨重启恢复；把"正在执行的 prompt"记录到磁盘，重启后从断点继续；CC 的 `/loop` 命令有更复杂的恢复机制。

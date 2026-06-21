@@ -3,7 +3,7 @@ type: concept
 status: seed
 domain: llm-agent
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-21
 aliases:
   - system prompt
   - prompt assembly
@@ -20,17 +20,29 @@ tags:
 > [!note]
 > 从 s01 到 s09，SYSTEM prompt 都是一行硬编码字符串。s10 把它拆成"分段 + 按状态组装 + 缓存"。每段独立维护，section 是否加载取决于真实状态（文件存不存在、工具有没有注册），不是消息关键词。这一课最大的观念转变：**prompt 是运行时组装出来的配置，不是写死的常量**。
 
+## 这节重点关注
+
+读完这节，你应该能在脑子里答出这 5 个问题：
+
+1. **三段职责**：`update_context` / `assemble_system_prompt` / `get_system_prompt` 各自管什么？（→ [核心抽象](#核心抽象)）
+2. **为什么拆**：为什么 s10 想在循环每轮都重新组装 SYSTEM？s09 只在入口组装一次够吗？（→ [演进与动机](#演进与动机)）
+3. **cache key**：为什么用 `json.dumps` 不用 `hash()`？单槽缓存的局限是什么？（→ [设计要点](#设计要点) + Q&A）
+4. **状态源**：`update_context(context, messages)` 两个参数为什么都没用到？为什么只看文件系统不看 messages？（→ [设计要点](#设计要点)）
+5. **API cache 的差距**：这个 harness cache 能省 API token 吗？CC 的 `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 在干什么？（→ [原本的 Claude Code 怎么做的](#原本的-claude-code-怎么做的)）
+
+**可以略读/跳过**：CC 的二十多个 section 列表、模式切换细节。**三段拆分 + memoized lookup 是主菜，section 枚举是配菜。**
+
 ## 这一步加了什么
 
-- 一个 `PROMPT_SECTIONS` 字典：每段 prompt 独立维护（identity / tools / workspace / memory）。
-- 一个 `assemble_system_prompt(context)`：根据 context 决定加载哪些 section，拼成字符串。
-- 一个 `get_system_prompt(context)`：**缓存 wrapper**——context 没变就返回上次的字符串。
-- 一个 `update_context()`：从真实状态（文件系统、TOOL_HANDLERS）派生 context dict。
-- 循环里**每轮工具执行后**重新调用 `get_system_prompt(context)`。
+| 新增 | 作用 | 重点? |
+|---|---|---|
+| `PROMPT_SECTIONS` 字典 | 每段 prompt 独立维护（identity / tools / workspace / memory） | ⭐⭐ |
+| `update_context()` | 从真实状态（文件系统 + TOOL_HANDLERS）派生 context dict | ⭐⭐⭐ |
+| `assemble_system_prompt(context)` | 按 context 决定加载哪些 section，拼成字符串 | ⭐⭐⭐ |
+| `get_system_prompt(context)` | 缓存 wrapper——context 没变就返回上次的字符串 | ⭐⭐⭐ |
+| 循环内重新组装 | 每轮工具执行后调 `get_system_prompt(context)` | ⭐⭐ |
 
-## 为什么需要加
-
-### 1. 硬编码 prompt 的三个痛点
+## 演进与动机
 
 s09 的 SYSTEM 已经是这个样子：
 
@@ -45,41 +57,19 @@ SYSTEM = (
 )
 ```
 
-三个问题：
+硬编码 prompt 有三个痛点：
 
 - **换项目要重写整个 prompt**：不知道哪些该改、哪些该留。
 - **改一处可能影响全局**：加一段工具描述可能跟前面的指令冲突。
 - **每次请求都带全部内容**：即使当前对话用不到某些段落也浪费 token。
 
-### 2. prompt 应该是"配置"不是"常量"
+更深层的问题——s09 的 `build_system()` 把"读状态 / 拼 SYSTEM"两件事揉在一个函数里，只在 agent_loop 入口调一次，整个循环用同一个 SYSTEM。但工具会改状态（`write_file` 写了 `.memory/MEMORY.md`，下一轮 SYSTEM 就该带上 memory section），s09 是"等下一轮用户提问时重算"，延迟一个回合。
 
-SYSTEM prompt 本质上是**对模型的运行时配置**——告诉它当前在哪个工作目录、有哪些工具、有什么记忆。既然是配置，就应该按当前状态动态组装，不是写死。
+s10 的转变：**prompt 是"配置"不是"常量"**——SYSTEM 本质上是"对模型的运行时配置"（工作目录 / 工具 / 记忆），既然是配置就该按当前状态动态组装。同时把 s09 揉成一团的 `build_system()` 拆成三个独立职责（读状态 / 拼字符串 / 加缓存），让"循环内反复调"成为可能——cache 解决性能、json.dumps 解决可比较性。
 
-s10 的转变就是把 SYSTEM 从**程序常量**升级成**配置对象**。
+## 核心抽象
 
-## 这是一个什么机制
-
-这是 **Section-Based Prompt Assembly + Memoized Lookup** 模式。三个独立职责：
-
-```mermaid
-%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
-flowchart LR
-    State[("真实状态<br/>文件系统 / TOOL_HANDLERS")]
-    Ctx["update_context()<br/>读状态 → context dict"]
-    Cache["get_system_prompt()<br/>查缓存"]
-    Asm["assemble_system_prompt()<br/>dict → 字符串"]
-    API["Anthropic API<br/>system=..."]
-
-    State --> Ctx --> Cache
-    Cache -->|miss| Asm --> API
-    Cache -->|hit| API
-
-    style Ctx fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-    style Cache fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style Asm fill:#dbeafe,stroke:#1e40af,stroke-width:2.5px,color:#1e3a8a
-```
-
-### 三个函数各司其职
+三个独立职责拆开：
 
 | 函数 | 输入 | 输出 | 职责 |
 |---|---|---|---|
@@ -87,13 +77,51 @@ flowchart LR
 | `assemble_system_prompt` | context dict | 字符串 | **拼字符串**：按 context 选 section |
 | `get_system_prompt` | context dict | 字符串 | **加缓存**：context 没变就不拼 |
 
-s09 的 `build_system()` 把这三件事揉在一个函数里。s10 拆开。
+s09 的 `build_system()` 把这三件事揉在一个函数里。s10 拆开。拆开的目的是**让"读状态"独立成可调用函数**——这样循环内每轮工具执行后能重新读，下一轮 API 调用拿到的 SYSTEM 永远反映最新状态。
+
+## 整体架构图
+
+这是 **Section-Based Prompt Assembly + Memoized Lookup** 模式。三个独立职责：
+
+```mermaid
+%%{init: {"theme":"base", "themeVariables": {
+  "fontSize":"16px",
+  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  "background":"#ffffff",
+  "primaryColor":"#eff6ff",
+  "primaryBorderColor":"#60a5fa",
+  "primaryTextColor":"#0f172a",
+  "lineColor":"#94a3b8"
+}}}%%
+flowchart LR
+    State[("<b>真实状态</b><br/>文件系统 / TOOL_HANDLERS")]
+    Ctx["<b>update_context</b><br/>读状态 → context dict"]
+    Cache["<b>get_system_prompt</b><br/>查缓存"]
+    Asm["<b>assemble_system_prompt</b><br/>dict → 字符串"]
+    API["<b>Anthropic API</b><br/>system=..."]
+
+    State --> Ctx --> Cache
+    Cache -->|miss| Asm --> API
+    Cache -->|hit| API
+
+    class State external
+    class Ctx,Asm mech
+    class Cache core
+    class API external
+
+    classDef core fill:#fef3c7,stroke:#d97706,stroke-width:3px,color:#78350f
+    classDef mech fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a
+    classDef data fill:#fce7f3,stroke:#db2777,stroke-width:2px,color:#831843
+    classDef external fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef persist fill:#e0e7ff,stroke:#6366f1,stroke-width:2px,color:#312e81
+    classDef decision fill:#fef9c3,stroke:#eab308,stroke-width:2px,color:#713f12
+    classDef warn fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
+    classDef terminal fill:#f3f4f6,stroke:#6b7280,stroke-width:1.5px,color:#1f2937
+```
 
 ### 为什么拆？因为要在循环里反复调
 
-s09 只在 agent_loop 入口调一次 `build_system()`，整个循环用同一个 SYSTEM。
-
-s10 想**每轮工具执行后都重新组装**——因为工具可能改变状态（比如 `write_file` 写了 `.memory/MEMORY.md`，下一轮 SYSTEM 就该带上 memory section）。
+s09 只在 agent_loop 入口调一次 `build_system()`，整个循环用同一个 SYSTEM。s10 想**每轮工具执行后都重新组装**——因为工具可能改变状态（`write_file` 写了 `.memory/MEMORY.md`，下一轮 SYSTEM 就该带上 memory section）。
 
 要在循环里反复调，就两个问题：
 
@@ -276,6 +304,66 @@ def agent_loop(messages: list, context: dict):
 > 1. **把动态内容塞静态段**：例如把当前 git 分支放进 identity section，每次变化都让整个 cache 失效。
 > 2. **缓存对象引用而非快照**：`context["enabled_tools"] = TOOL_HANDLERS.keys()` 直接放视图，dict 变化时视图也变，cache key 不稳定。
 > 3. **期望这个 cache 省 API 钱**：它只省 harness 内部的字符串拼接 CPU。要省 API 钱，得用 `cache_control` 标记（CC 的做法）。
+
+## 代码骨架总览
+
+剥掉 section 内容、CC 二十多个 section 的枚举，s10 的核心抽象只有这么多代码：
+
+```python
+# === 1. section 字典：每段独立维护 ===
+PROMPT_SECTIONS = {
+    "identity":  "You are a coding agent. Act, don't explain.",
+    "tools":     "Available tools: bash, read_file, write_file.",
+    "workspace": f"Working directory: {WORKDIR}",
+    "memory":    "Relevant memories are injected below when available.",
+}
+
+# === 2. 读状态：从真实状态派生 context dict ===
+def update_context(context, messages):    # 注：messages 参数未使用，见 Q4
+    memories = ""
+    if MEMORY_INDEX.exists():
+        content = MEMORY_INDEX.read_text().strip()
+        if content: memories = content
+    return {
+        "enabled_tools": list(TOOL_HANDLERS.keys()),   # list() 冻结 dict_keys 视图
+        "workspace":     str(WORKDIR),                   # Path → str 才能 json.dumps
+        "memories":      memories,
+    }
+
+# === 3. 拼 SYSTEM：按 context 选 section ===
+def assemble_system_prompt(context: dict) -> str:
+    sections = [PROMPT_SECTIONS["identity"],
+                PROMPT_SECTIONS["tools"],
+                PROMPT_SECTIONS["workspace"]]
+    if context.get("memories"):
+        sections.append(f"Relevant memories:\n{context['memories']}")
+    return "\n\n".join(sections)
+
+# === 4. 缓存 wrapper：context 没变就不拼 ===
+_last_context_key = None
+_last_prompt = None
+
+def get_system_prompt(context: dict) -> str:
+    global _last_context_key, _last_prompt
+    key = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
+    if key == _last_context_key and _last_prompt:
+        return _last_prompt
+    _last_context_key = key
+    _last_prompt = assemble_system_prompt(context)
+    return _last_prompt
+
+# === 5. agent_loop 接入：每轮工具后重新组装 ===
+def agent_loop(messages: list, context: dict):
+    system = get_system_prompt(context)
+    while True:
+        response = client.messages.create(..., system=system, messages=messages, ...)
+        ...
+        # 工具执行后状态可能变了，重算 context 和 system
+        context = update_context(context, messages)
+        system = get_system_prompt(context)   # 命中 cache 就直接返回
+```
+
+**这 5 块构成了 s10 的全部抽象层**。下一节 s11 Error Recovery 会复用这个 system 组装，但把 `client.messages.create` 包进 `with_retry + RecoveryState`。
 
 ## Q&A
 

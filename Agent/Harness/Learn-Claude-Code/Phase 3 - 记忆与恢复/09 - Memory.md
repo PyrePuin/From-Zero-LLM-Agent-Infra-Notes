@@ -3,7 +3,7 @@ type: concept
 status: seed
 domain: llm-agent
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-21
 aliases:
   - memory
   - 记忆系统
@@ -19,59 +19,97 @@ tags:
 > [!note]
 > s08 的压缩是有损的——"用 tab 不用空格"可能被简化成"用户有代码风格偏好"。新会话连摘要都没。Memory 是一层**不参与压缩、跨会话保留**的存储：每条记忆一个 markdown 文件，索引常驻 SYSTEM，内容按需注入到当前 user turn。模型在每轮结束时自动从对话里提取值得长期记的东西。
 
+## 这节重点关注
+
+读完这节，你应该能在脑子里答出这 5 个问题：
+
+1. **存储分层**：为什么索引进 SYSTEM、内容进 user turn？为什么不把所有记忆全塞 SYSTEM？（→ [整体架构图](#整体架构图)）
+2. **镜像模式**：`load_memories` 和 `extract_memories` 为什么是对称的两个 side-query？（→ [镜像模式：load 和 extract](#镜像模式load-和-extract)）
+3. **避免死循环**：`memory_turn` 这个变量到底有什么用？为什么注入记忆要用 messages 副本？（→ [实现对照](#实现对照s09codepy)）
+4. **四类分类**：user / feedback / project / reference 为什么不是装饰？consolidate 怎么用？（→ [四类记忆](#四类记忆)）
+5. **fallback 兜底**：side-query 失败时关键词匹配在干什么？（→ [设计要点](#设计要点)）
+
+**可以略读/跳过**：`consolidate_memories` 内部 prompt 模板、frontmatter 解析细节。**双层记忆 + 镜像模式是主菜，CRUD 是配菜。**
+
 ## 这一步加了什么
 
-- 一个 `.memory/` 目录，每条记忆是一个 `.md` 文件，带 YAML frontmatter（`name` / `description` / `type`）。
-- 一个 `MEMORY.md` 索引：一行一条链接，**注入 SYSTEM prompt**，每轮常驻。
-- 一组 CRUD 函数：`write_memory_file` / `read_memory_file` / `list_memory_files` / `_rebuild_index`。
-- 一对**镜像函数**：
-  - `load_memories(messages)`：每轮开始时跑，选出相关记忆注入到 user turn。
-  - `extract_memories(messages)`：每轮结束时跑，从对话里提取新记忆写入磁盘。
-- 一个**整理函数**：`consolidate_memories`，文件数 ≥ 10 时触发，合并重复、删除过时。
+| 新增 | 作用 | 重点? |
+|---|---|---|
+| `.memory/` 目录 | 每条记忆一个 `.md` 文件，YAML frontmatter（name / description / type） | ⭐⭐ |
+| `MEMORY.md` 索引 | 一行一条链接，注入 SYSTEM prompt，每轮常驻 | ⭐⭐⭐ |
+| `write_memory_file` / `read_memory_file` | 记忆 CRUD（写后自动 `_rebuild_index`） | ⭐ |
+| `_rebuild_index` | 扫描 `.memory/*.md` 重建 `MEMORY.md` | ⭐ |
+| `load_memories(messages)` | 每轮开始跑，LLM 选相关记忆注入 user turn | ⭐⭐⭐ |
+| `extract_memories(messages)` | 每轮结束跑，LLM 从对话提取新记忆写入磁盘 | ⭐⭐⭐ |
+| `select_relevant_memories` | side-query：构建 catalog 让 LLM 返回 JSON 数组 | ⭐⭐ |
+| `consolidate_memories` | 文件数 ≥ 10 时触发，合并重复 / 删除过时 | ⭐⭐ |
 
-## 为什么需要加
+## 演进与动机
 
-### 1. 压缩是有损的
-
-s08 的 `compact_history` 让 LLM 把历史写成摘要。但 LLM 会"概括"：
+s08 的压缩是有损的——`compact_history` 让 LLM 把历史写成摘要，但 LLM 会"概括"：
 
 - "用 tab 缩进不要用空格" → 被压成 "用户有代码风格偏好"
 - "auth 重写是合规驱动" → 被压成 "正在改 auth 模块"
 
-这种概括**对继续当前任务够用**（知道有偏好、有任务），但**对跨会话不够用**（下次开会话时你忘了具体规则）。
+这种概括**对继续当前任务够用**（知道有偏好、有任务），但**对跨会话不够用**——每次启动新会话 messages 是空的，s08 的压缩摘要只存在于上个会话的内存里。如果你上次告诉 Agent "永远用 tab"，这次它完全不知道。
 
-### 2. 新会话从零开始
+根本约束：**LLM 本身没记忆**。所谓"它记住了"其实是"它在这一轮的上下文里看到了"。所以"跨会话记忆"=**每次开会话时把磁盘上的相关内容读出来注入到上下文**。
 
-每次启动新会话，messages 是空的。s08 的压缩摘要也只存在于上个会话的内存里。如果你上次告诉 Agent "永远用 tab"，这次它完全不知道。
+s09 的解法是加一层**不参与压缩、写在磁盘上、不随会话结束消失**的存储。核心抽象是"**双层记忆 + 索引**"——索引常驻 SYSTEM（便宜，可被 prompt cache），内容按需注入 user turn（贵，按对话相关性选）。和操作系统的存储层级同构。
 
-需要一层**写在磁盘上、不随会话结束消失**的存储。
+## 核心抽象
 
-### 3. 模型不能"记住"——只能"读到"
+```
+[用户说"永远用 tab"]
+      ↓ agent_loop 结束
+[extract_memories]  ← side-query：LLM 从对话提取
+      ↓ 写文件
+[.memory/code-style.md]  ← 磁盘持久化
+      ↓ 重建
+[MEMORY.md 索引]          ← 注入 SYSTEM（每轮常驻，可被 API cache）
+=================== 会话边界 ===================
+[下次新会话]
+      ↓ agent_loop 开始
+[load_memories]     ← side-query：LLM 选相关
+      ↓ 读文件内容
+[注入 user turn 副本]     ← 不破坏 cache，污染原 messages
+```
 
-LLM 本身没记忆。所谓"它记住了"其实是"它在这一轮的上下文里看到了"。所以"跨会话记忆"=**每次开会话时把磁盘上的相关内容读出来注入到上下文**。
+### 关键设计原则：索引与内容分开注入
 
-这是 Memory 系统的本质：**一个会被反复读进上下文的磁盘存储**。
+- **索引**进 SYSTEM（每轮都在，可被 API prompt cache 缓存）。
+- **内容**进 user turn（按需，不破坏 cache，按 filename/description 匹配当前对话）。
 
-## 这是一个什么机制
+如果把所有记忆内容都塞 SYSTEM，每次任何一条变化都会让整个 SYSTEM cache 失效。分开注入让 cache 命中率最大化。
+
+## 整体架构图
 
 这是 **Two-Tier Memory with Index**（双层记忆 + 索引）模式。和操作系统的存储层级同构：
 
 ```mermaid
-%%{init: {'themeVariables': {'fontSize': '16px', 'fontFamily': 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'}}}%%
+%%{init: {"theme":"base", "themeVariables": {
+  "fontSize":"16px",
+  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+  "background":"#ffffff",
+  "primaryColor":"#eff6ff",
+  "primaryBorderColor":"#60a5fa",
+  "primaryTextColor":"#0f172a",
+  "lineColor":"#94a3b8"
+}}}%%
 flowchart TB
     subgraph Cheap["便宜层（常驻 SYSTEM）"]
-        Index["MEMORY.md 索引<br/>一行一条：name + description<br/>≤ 200 行"]
+        Index["<b>MEMORY.md 索引</b><br/>一行一条：name + description<br/>≤ 200 行"]
     end
     subgraph Expensive["贵层（按需注入 user turn）"]
-        File1["memory-file-1.md<br/>完整内容 + frontmatter"]
-        File2["memory-file-2.md"]
+        File1["<b>memory-file-1.md</b><br/>完整内容 + frontmatter"]
+        File2["<b>memory-file-2.md</b>"]
         File3["..."]
     end
     subgraph Trigger["每轮开始"]
-        Load["load_memories()<br/>LLM 选相关文件<br/>读内容注入"]
+        Load["<b>load_memories</b><br/>LLM 选相关文件<br/>读内容注入"]
     end
     subgraph Write["每轮结束"]
-        Extract["extract_memories()<br/>LLM 从对话提取<br/>写新文件 + 重建索引"]
+        Extract["<b>extract_memories</b><br/>LLM 从对话提取<br/>写新文件 + 重建索引"]
     end
 
     Index -.->|被选中的文件| File1
@@ -82,9 +120,18 @@ flowchart TB
     Extract --> File1
     Extract --> Index
 
-    style Index fill:#d1fae5,stroke:#047857,stroke-width:2.5px,color:#064e3b
-    style Load fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
-    style Extract fill:#fde68a,stroke:#b45309,stroke-width:3px,color:#451a03
+    class Index persist
+    class File1,File2,File3 persist
+    class Load,Extract core
+
+    classDef core fill:#fef3c7,stroke:#d97706,stroke-width:3px,color:#78350f
+    classDef mech fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#1e3a8a
+    classDef data fill:#fce7f3,stroke:#db2777,stroke-width:2px,color:#831843
+    classDef external fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
+    classDef persist fill:#e0e7ff,stroke:#6366f1,stroke-width:2px,color:#312e81
+    classDef decision fill:#fef9c3,stroke:#eab308,stroke-width:2px,color:#713f12
+    classDef warn fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
+    classDef terminal fill:#f3f4f6,stroke:#6b7280,stroke-width:1.5px,color:#1f2937
 ```
 
 **关键设计**：索引和内容**分开注入**。
@@ -273,6 +320,97 @@ def agent_loop(messages: list):
 > 2. **压缩后才提取**：压缩丢了细节，提取要在压缩前的快照上做。
 > 3. **没有 consolidate**：文件数无上限增长，索引爆 SYSTEM。
 > 4. **什么都存**：代码模式、git 历史这些读代码就知道的事，存了就是噪音。
+
+## 代码骨架总览
+
+剥掉 frontmatter 解析、consolidate prompt 模板等细节，s09 的核心抽象层只有这么多代码。这是你真正需要记住的部分。
+
+```python
+# === 1. 记忆文件 CRUD + 索引重建 ===
+def write_memory_file(name, mem_type, description, body):
+    slug = name.lower().replace(" ", "-").replace("/", "-")
+    filepath = MEMORY_DIR / f"{slug}.md"
+    filepath.write_text(
+        f"---\nname: {name}\ndescription: {description}\ntype: {mem_type}\n---\n\n{body}\n"
+    )
+    _rebuild_index()
+    return filepath
+
+def _rebuild_index():
+    lines = []
+    for f in sorted(MEMORY_DIR.glob("*.md")):
+        if f.name == "MEMORY.md": continue
+        meta, body = _parse_frontmatter(f.read_text())
+        name = meta.get("name", f.stem)
+        desc = meta.get("description", body.split("\n")[0][:80])
+        lines.append(f"- [{name}]({f.name}) — {desc}")
+    MEMORY_INDEX.write_text("\n".join(lines) + "\n" if lines else "")
+
+# === 2. 选相关记忆（side-query + fallback）===
+def select_relevant_memories(messages):
+    files = list_memory_files()
+    if not files: return []
+    recent = "\n".join(_recent_text(messages, 10))
+    catalog = "\n".join(f"{i}: {f['name']} — {f['description']}" for i, f in enumerate(files))
+    try:
+        resp = client.messages.create(
+            model=MODEL_ID, max_tokens=200,
+            messages=[{"role": "user",
+                "content": f"...\n\n{recent}\n\n{catalog}\n\nReturn ONLY a JSON array of integers."}],
+        )
+        indices = _extract_json_array(resp.content[0].text)
+        return [files[i]["filename"] for i in indices if 0 <= i < len(files)]
+    except Exception:
+        # fallback：关键词匹配（> 3 字符的词）
+        keywords = [w.lower() for w in recent.split() if len(w) > 3]
+        return [f["filename"] for f in files
+                if any(kw in (f["name"] + " " + f["description"]).lower() for kw in keywords)]
+
+# === 3. 镜像函数：load / extract ===
+def load_memories(messages):
+    selected = select_relevant_memories(messages)
+    if not selected: return ""
+    parts = ["<relevant_memories>"]
+    for fn in selected:
+        content = read_memory_file(fn)
+        if content: parts.append(content)
+    parts.append("</relevant_memories>")
+    return "\n\n".join(parts)
+
+def extract_memories(messages):
+    # side-query 让 LLM 看最近对话 + 现有记忆 catalog，返回新记忆 JSON
+    # 已被覆盖就返回 []，避免重复写入
+    ...
+
+# === 4. agent_loop 接入（memory_turn 是关键）===
+def agent_loop(messages: list):
+    memories_content = load_memories(messages)
+    # 记录"哪一轮 user 被注入了记忆"——必须用副本注入，原 messages 保持干净
+    memory_turn = (len(messages) - 1
+                   if messages and isinstance(messages[-1].get("content"), str) else None)
+    system = build_system()
+    while True:
+        request_messages = messages
+        if memories_content and memory_turn is not None and memory_turn < len(messages):
+            request_messages = messages.copy()   # ← 副本，不污染原 messages
+            request_messages[memory_turn] = {
+                **messages[memory_turn],
+                "content": memories_content + "\n\n" + messages[memory_turn]["content"],
+            }
+        response = client.messages.create(..., messages=request_messages, system=system)
+        ...
+        if response.stop_reason == "tool_use":
+            # 执行工具，循环
+            ...
+            continue
+        # 真正结束（非工具回合）才提取，用 pre_compress 快照
+        pre_compress = list(messages)
+        extract_memories(pre_compress)
+        consolidate_memories()
+        return
+```
+
+**这 4 块构成了 s09 的全部抽象层**。下一节 s10 System Prompt 会把 `build_system()` 拆成 context + assembly + cache 三段，让 SYSTEM 也变成"按状态组装的配置"。
 
 ## Q&A
 
