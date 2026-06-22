@@ -29,13 +29,14 @@ aliases:
 
 ## 这节重点关注
 
-读完这一节应该能回答 5 个问题：
+读完这一节应该能回答 6 个问题：
 
 1. **心跳和 cron 都是"定时跑"，本质差异是什么？** → 看 [[#心跳 vs Cron：两种抽象的对比]]（探询 vs 任务）
 2. **lane_lock 为什么只在用户和心跳之间共享，cron 不参与？** → 看 [[#Lane 锁的不对称设计]]（有意的不对称）
-3. **心跳什么时候会真的"说话"？为什么教学版几乎看不到效果？** → 看 [[#HEARTBEAT_OK 与"沉默权"]] + [[#Q&A]] Q3
-4. **CronService 的 3 种调度类型怎么算下次触发时间？** → 看 [[#CronService 的 3 种调度类型]]
-5. **心跳和 cron 怎么跟主 agent_loop 通信？** → 看 [[#整体架构图]] 的 queue + drain 模式
+3. **s07 和 [[14 - Cron Scheduler|learn-claude-code s14]] 的对称互斥设计有什么取舍差异？** → 看 [[#vs learn-claude-code s14：两种 cron 范式]]
+4. **心跳什么时候会真的"说话"？为什么教学版几乎看不到效果？** → 看 [[#HEARTBEAT_OK 与"沉默权"]] + [[#Q&A]] Q3
+5. **CronService 的 3 种调度类型怎么算下次触发时间？** → 看 [[#CronService 的 3 种调度类型]]
+6. **心跳和 cron 怎么跟主 agent_loop 通信？** → 看 [[#整体架构图]] 的 queue + drain 模式
 
 **略读指引**：`/heartbeat` `/trigger` `/cron` `/lanes` 这些 REPL 命令（L562-599）都是 thin wrapper，不是机制核心；`croniter` 库的用法细节用时再查；`_compute_next` 的时区 / 锚点细节是工程难点但不是设计重点。
 
@@ -258,6 +259,101 @@ cron_svc = CronService(WORKSPACE_DIR / "CRON.json")
 
 这是**有意的不对称**，不是疏漏。**cron 不抢锁是 feature，不是 bug**。
 
+## vs learn-claude-code s14：两种 cron 范式
+
+这一节和 [[14 - Cron Scheduler|learn-claude-code s14]] 是 **claw0 整个 Phase 7 跟 learn-claude-code 唯一的范式分歧**——其他节都是"同一思想的不同实现"，唯独 cron 这块，两个项目做了**根本不同的架构选择**。学过 learn-claude-code 再读 s07，必须理解这个对照，否则会把 claw0 的设计当成"标准"。
+
+### s14：对称互斥（一把锁）
+
+```python
+# learn-claude-code s14 的核心
+agent_lock = threading.Lock()    # 一把锁
+
+# 用户路径
+with agent_lock:
+    run_agent_turn_locked(query)
+
+# Cron 路径（queue_processor 守护线程）
+if not agent_lock.acquire(blocking=False): continue   # 抢不到让步
+try:
+    run_agent_turn_locked()                             # ← 走同一条 agent turn
+finally:
+    agent_lock.release()
+```
+
+**设计**：
+- Cron 任务通过 **queue + processor** 投递，最终走和用户**同一条 agent_turn 路径**
+- **共享同一份 messages / session_history**
+- 两路径都抢 `agent_lock`，**对称互斥**
+
+**语义**：cron 就是"**延迟的用户消息**"。Agent 视角下分不清这次 turn 是用户还是 cron 触发的——cron 跑的内容进入主对话历史，用户下一句问"刚才那个报告什么意思"，agent 看得见上下文。
+
+### s07：不对称（cron 不参与）
+
+```python
+# claw0 s07 的核心
+lane_lock = threading.Lock()    # 一把锁
+
+# 用户路径
+lane_lock.acquire()
+try: ... finally: lane_lock.release()
+
+# 心跳路径（非阻塞抢，让步）
+acquired = lane_lock.acquire(blocking=False)
+if not acquired: return
+
+# Cron 路径：完全不参与
+output = run_agent_single_turn(msg, sys_prompt)   # ← 独立调用，独立 messages
+```
+
+**设计**：
+- Cron **不走 agent_loop**，直接调 `run_agent_single_turn`（无状态、独立 messages）
+- **后台和前台的 messages 完全隔离**
+- Cron 不抢锁，跟用户可能并发跑
+
+**语义**：cron 是"**独立的后台任务**"，跟用户对话是两条平行的故事线。
+
+### 五维对比
+
+| 维度 | s14（对称互斥） | s07（不对称） |
+|---|---|---|
+| 锁模型 | 一把 agent_lock，用户+cron 都抢 | 一把 lane_lock，仅用户+心跳 |
+| Cron 路径 | agent_loop 同一条 | run_agent_single_turn 独立 |
+| Messages | ✅ 共享 session_history | ❌ 各自独立 |
+| 触发延迟 | 用户跑完才能跑（队列等待） | 立刻跑，不延迟 |
+| 跑的内容 | 进主对话历史（用户后续看得见） | 进 `_output_queue`（独立投递） |
+| LLM rate limit | 不会撞（互斥） | 可能撞（并发） |
+| 上下文连续性 | 高（cron 跟用户对话衔接） | 低（cron 不知道用户聊了啥） |
+
+### 为什么会分歧
+
+两个项目**目标场景不同**：
+
+- **learn-claude-code 是 CLI coding agent**——用户坐在终端前跟 agent 长时间协作。Cron 任务是"我等会儿帮我跑个测试"、"每天 9 点拉一下 PR 状态"——这些**本质是对话的一部分**。强行隔离会让用户问"昨天那个报告哪去了"时答不上来。
+
+- **claw0 是常驻服务 / IM bot 前身**——用户**不在场**，agent 服务多个用户、多个通道。Cron 任务是"主动 push 通知"、"全局巡更"——这些**本质是系统侧主动行为**，跟某个用户的对话不属于一个故事。强行共享 messages 会污染对话。
+
+**关键洞察**：cron 的语义在两种场景里**根本不一样**。
+
+- CLI 场景：cron = **用户委托的延迟指令**（"替我跑") → 应该走对话路径
+- IM 场景：cron = **agent 主动的告知行为**（"我要说") → 应该独立
+
+所以 s07 不抢锁不是"claw0 的设计失误"（学过 s14 容易这么误读），而是**为了 IM 场景刻意做的偏离**。同理 s14 不让 cron 独立也不是"learn-claude-code 不懂解耦"，而是**为了对话连续性必须做的耦合**。
+
+### 共通的部分
+
+虽然锁模型不同，两者在**架构解耦**上是同源的：
+
+| 抽象 | s14 | s07 |
+|---|---|---|
+| 调度层（Scheduler） | `cron_scheduler_loop` 守护线程 A，每秒检查时间 | `cron_loop` 守护线程，每秒 `tick()` |
+| 触发缓冲 | `cron_queue` list + `cron_lock` | `_output_queue` list + `_queue_lock` |
+| 持久化 | `.scheduled_tasks.json`（durable job） | `CRON.json` + `cron-runs.jsonl` 运行日志 |
+| 错误处理 | 重试逻辑（在 queue_processor） | **5 次连续错误自动禁用** |
+| 锁获取点 | queue_processor 抢 `agent_lock` | 用户抢 `lane_lock`、心跳非阻塞抢 |
+
+**学到的东西**：cron 系统的"调度 + 缓冲 + 持久化"三层模式是通用的；**锁的获取点**才是项目根据场景做的取舍。
+
 ## HEARTBEAT_OK 与"沉默权"
 
 心跳最特殊的设计：**让 LLM 自己决定要不要开口**。
@@ -372,8 +468,8 @@ else:
 - [[06 - Intelligence]] —— HEARTBEAT.md 在 s06 第 6 层 Bootstrap 注入 prompt
 - [[04 - Channels]] —— s07 的输出还只到 CLI 屏幕，s08 才会接入正式通道
 - [[05 - Gateway & Routing]] —— 多 agent 场景下，每个 agent 该有独立的心跳（s07 是单 agent 退化版）
-- [[12 - Background Tasks]] —— learn-claude-code 对应节，纯 cron 思路 vs s07 的心跳 + cron 双轨
-- [[14 - Heartbeat Loop]] —— learn-claude-code 对应节，子任务 / spawn 模式
+- [[14 - Cron Scheduler]] —— **learn-claude-code 对应节**，两种 cron 范式对照（详见 [[#vs learn-claude-code s14：两种 cron 范式]]）
+- [[12 - Background Tasks]] —— learn-claude-code 的子任务 / spawn 模式
 - [[对话精华]] —— Q22+ 记录 s07 的卡点
 
 > [!warning] 易踩坑
@@ -557,6 +653,8 @@ def agent_loop():
 
 **代价**：cron 多任务并发可能撞 LLM rate limit。生产代码在 CronService 内部加信号量解决，**不是用 lane_lock**。
 
+**对比 [[14 - Cron Scheduler|learn-claude-code s14]]**：s14 用**对称互斥**（一把 agent_lock，用户和 cron 都抢），因为 cron 走和用户同一条 agent_turn 路径、共享 messages。claw0 的不对称是为了 IM 场景**刻意做的偏离**——cron 在 IM 场景下是"主动 push 通知"，跟用户对话不属于同一故事线。详见 [[#vs learn-claude-code s14：两种 cron 范式]]。
+
 ### Q3: 心跳什么时候会真正说话？为什么教学版几乎看不到效果？
 
 **A**: 心跳说话需要**三个前提同时满足**：
@@ -628,5 +726,14 @@ def agent_loop():
 3. `CronService.tick` + `_run_job`（L392-454，63 行）—— 调度 + 错误自动禁用
 4. `CronService._compute_next`（L363-390，28 行）—— 3 种调度类型的核心
 5. `agent_loop`（L498-645）的 **L499 + L503-504 + L544-548 + L602/L641** 共 ~10 行 —— 锁的诞生与共享、drain 模式、用户路径加锁
+
+### Q11: s07 和 learn-claude-code s14 的 cron 范式有什么根本差异？
+
+**A**: **两种相反的架构选择**：
+
+- **s14（对称互斥）**：cron 通过 queue 投递、走 agent_loop 同一条路径、共享 messages。一把 `agent_lock` 让用户和 cron 排队。语义：cron 是"**用户委托的延迟指令**"。
+- **s07（不对称）**：cron 直接调 `run_agent_single_turn`、独立 messages、不抢锁。一把 `lane_lock` 只在用户和心跳之间。语义：cron 是"**agent 主动的告知行为**"。
+
+**分歧根源**是目标场景：s14 是 CLI coding agent（对话连续性优先），s07 是 IM bot 前身（系统侧通知与用户对话解耦优先）。**两个都不是错**——学过 s14 再读 s07 容易误以为 claw0 设计有缺陷，实际上是为了 IM 场景刻意做的偏离。详见 [[#vs learn-claude-code s14：两种 cron 范式]]。
 
 跳过：`handle_repl_command`（L562-599，调试命令）、`print_*` 系列辅助、croniter 库用法细节（用时再查）。
