@@ -7,6 +7,40 @@
 >
 > 旧版（`v2` 合并前）保留在 git 历史里，需要时可用 `git log` 回溯。
 
+## 源码（submodule）
+
+笔记引用的源码已作为 git submodule 内嵌在仓库里：
+
+```
+Agent/Harness/Learn-Claude-Code/
+└── learn-claude-code-src/         ← learn-claude-code 源码（submodule）
+    ├── s01_agent_loop/             ← 每节一个目录
+    │   ├── code.py                 ← 教学实现
+    │   └── README.md               ← 原作者讲解
+    ├── s02_tool_use/
+    └── ... (s03-s20)
+```
+
+**首次 clone 后初始化**：
+
+```bash
+git submodule update --init --recursive
+```
+
+或重新 clone 时带 `--recursive`：
+
+```bash
+git clone --recursive <repo-url>
+```
+
+**更新到上游最新**：
+
+```bash
+git submodule update --remote Agent/Harness/Learn-Claude-Code/learn-claude-code-src
+```
+
+数据文件的实际样例看 [`数据样例/`](数据样例/) —— 那里有 TodoWrite / Memory / System Prompt / Task / Cron / MCP / RecoveryState 等数据长什么样的完整说明。
+
 > [!tip] 学完这 6 个 Phase 之后看哪里？
 > **下一步：[`../Claw-Theory/`](../Claw-Theory/)** —— 从 Phase 7 起切到 [shareAI-lab/claw0](https://github.com/shareAI-lab/claw0)，学产品级常驻 Agent 的架构（多通道 / 路由 / 心跳 / 投递 / 重试 / 并发）。骨架不变（[[01 - Agent Loop]] 的循环），扩展方向是"把 Agent 从 CLI 跑成生产服务"。
 

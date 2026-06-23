@@ -28,6 +28,9 @@ aliases:
 > [!warning] 编号说明
 > 这是 claw0 第 8 节（s08），属于 [[README|Claw-Theory]] Phase 7 的第 5 步。前置：[[07 - Heartbeat & Cron]]（三个生产者都来自 s07）。后继：[[09 - Resilience]] 会把投递重试跟模型重试、连接重试组成"三层韧性"。
 
+> [!tip] 数据样例
+> QueuedDelivery JSON 的 3 种状态（待发 / 重试中 / failed）和 outbox 目录布局：[`../数据样例/04 - 投递队列.md`](../数据样例/04%20-%20投递队列.md)
+
 ## 这节重点关注
 
 读完这一节应该能回答 6 个问题：

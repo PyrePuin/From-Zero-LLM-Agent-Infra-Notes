@@ -5,6 +5,37 @@
 > [!tip] 学这一文件夹之前看哪里？
 > **前置：[`../Learn-Claude-Code/`](../Learn-Claude-Code/)** —— Phase 1-6 的 learn-claude-code 是骨架（agent loop / tools / hooks / memory / subagent / skill）。claw0 复用了这些概念但不再重复讲解。
 
+## 源码（submodule）
+
+笔记引用的源码已作为 git submodule 内嵌在仓库里：
+
+```
+Agent/Harness/Claw-Theory/
+└── claw0/                    ← claw0 源码（submodule）
+    ├── sessions/zh/          ← s01-s10 教学 .py + .md
+    └── workspace/            ← 8 个配置 .md + CRON.json 示例
+```
+
+**首次 clone 后初始化**：
+
+```bash
+git submodule update --init --recursive
+```
+
+或重新 clone 时带 `--recursive`：
+
+```bash
+git clone --recursive <repo-url>
+```
+
+**更新到上游最新**：
+
+```bash
+git submodule update --remote Agent/Harness/Claw-Theory/claw0
+```
+
+数据文件的实际样例看 [`数据样例/`](数据样例/) —— 那里有 SOUL.md / HEARTBEAT.md / CRON.json / QueuedDelivery.json 等文件长什么样的完整说明。
+
 ## 这套笔记的主线
 
 learn-claude-code 教的是"Agent 在一个终端里"。claw0 教的是"Agent 跑成一个服务"：
@@ -53,7 +84,9 @@ flowchart TD
 - s09 Resilience（3 层重试洋葱）
 - s10 Concurrency（命名 lane）
 
-遇到具体疑问时翻 **对话精华 QA**。
+读完 7 节，最后看 [[Phase 7 - 常驻 Agent/00 - 综合总结|Phase 7 综合总结]] 把 7 层串成一张图。
+
+遇到具体疑问时翻 **对话精华 QA**。遇到数据文件不知道长什么样翻 **[数据样例](数据样例/)**。
 
 ## 每篇笔记的固定结构
 

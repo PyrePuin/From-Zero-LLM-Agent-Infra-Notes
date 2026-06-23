@@ -27,6 +27,10 @@ aliases:
 > [!warning] 编号说明
 > 这是 claw0 第 7 节（s07），属于 [[README|Claw-Theory]] Phase 7 的第 4 步。前置：[[06 - Intelligence]]（HEARTBEAT.md 在那里加载）。后继：[[08 - Delivery]] 会把 `_output_queue` 替换成更系统的投递管道。
 
+> [!tip] 数据样例
+> - HEARTBEAT.md 的实际内容（含 `HEARTBEAT_OK` 约定）：[`../数据样例/01 - workspace 配置文件.md#HEARTBEAT.md`](../数据样例/01%20-%20workspace%20配置文件.md)
+> - CRON.json 的 4 种 schedule 类型（cron / at / every / 一次性）：[`../数据样例/02 - CRON 调度配置.md`](../数据样例/02%20-%20CRON%20调度配置.md)
+
 ## 这节重点关注
 
 读完这一节应该能回答 6 个问题：

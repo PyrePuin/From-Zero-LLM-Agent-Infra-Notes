@@ -25,6 +25,9 @@ tags:
 > [!warning] Phase 7 编号说明
 > Phase 1-6 是 learn-claude-code 的 s01-s20（20 节）。Phase 7 切到 **claw0**（shareAI-lab），claw0 自己有 s01-s10 编号。本目录文件名用 `04 - Channels.md`（claw0 原编号），**不是**续接 learn-claude-code 的 s04 Hooks。
 
+> [!tip] 数据样例
+> 通道层相关的会话持久化（sessions.json + `<id>.jsonl`）：[`../数据样例/03 - 会话持久化.md`](../数据样例/03%20-%20会话持久化.md)
+
 ## 这节重点关注
 
 读完这节，你应该能在脑子里答出这 5 个问题：

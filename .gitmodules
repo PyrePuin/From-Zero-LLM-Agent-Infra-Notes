@@ -1,0 +1,6 @@
+[submodule "Agent/Harness/Claw-Theory/claw0"]
+	path = Agent/Harness/Claw-Theory/claw0
+	url = https://github.com/shareAI-lab/claw0.git
+[submodule "Agent/Harness/Learn-Claude-Code/learn-claude-code-src"]
+	path = Agent/Harness/Learn-Claude-Code/learn-claude-code-src
+	url = https://github.com/shareAI-lab/learn-claude-code.git

@@ -26,6 +26,9 @@ aliases:
 > [!warning] 编号说明
 > 这是 claw0 第 6 节（s06），属于 [[README|Claw-Theory]] Phase 7 的第 3 步。前置：[[04 - Channels]] / [[05 - Gateway & Routing]]。后继：s07 Heartbeat 会复用这里的 `HEARTBEAT.md`。
 
+> [!tip] 数据样例
+> 8 个 workspace markdown 文件（SOUL.md / IDENTITY.md / TOOLS.md / USER.md / HEARTBEAT.md / BOOTSTRAP.md / AGENTS.md / MEMORY.md）的实际内容看 [`../数据样例/01 - workspace 配置文件.md`](../数据样例/01%20-%20workspace%20配置文件.md)。
+
 ## 这节重点关注
 
 读完这一节应该能回答 5 个问题：

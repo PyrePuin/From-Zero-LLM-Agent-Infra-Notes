@@ -25,6 +25,9 @@ tags:
 > [!warning] Phase 7 编号说明
 > Phase 1-6 是 learn-claude-code 的 s01-s20。Phase 7 切到 **claw0**（shareAI-lab），claw0 自己有 s01-s10 编号。本目录文件名 `05 - Gateway & Routing.md` 是 claw0 原编号。
 
+> [!tip] 数据样例
+> BindingTable 的 5 级 binding 实际配置（T1 peer_id 到 T5 default）：[`../数据样例/06 - 路由绑定.md`](../数据样例/06%20-%20路由绑定.md)
+
 ## 这节重点关注
 
 读完这节，你应该能在脑子里答出这 5 个问题：

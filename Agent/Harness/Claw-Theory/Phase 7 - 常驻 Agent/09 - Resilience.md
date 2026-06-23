@@ -30,6 +30,9 @@ aliases:
 > [!warning] 编号说明
 > 这是 claw0 第 9 节（s09），属于 [[README|Claw-Theory]] Phase 7 的第 6 步。前置：[[08 - Delivery]]（投递层把消息写盘后，这一节回答"调 LLM 本身挂了怎么办"）。后继：[[10 - Concurrency]] 把单 lane 扩展成多 lane 并发。
 
+> [!tip] 数据样例
+> AuthProfile 的 6 种 failure_reason 状态 + cooldown_until 时间戳的实际值：[`../数据样例/05 - AuthProfile 状态.md`](../数据样例/05%20-%20AuthProfile%20状态.md)
+
 ## 这节重点关注
 
 读完这一节应该能回答 6 个问题：
