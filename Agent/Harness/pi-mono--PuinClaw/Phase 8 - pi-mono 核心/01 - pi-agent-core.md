@@ -344,6 +344,194 @@ flowchart TD
 - `hasMoreToolCalls: boolean` —— 当前 assistant 消息是否有工具调用
 - `firstTurn: boolean` —— 是否首轮（避免重复发 turn_start）
 
+### 4.4 工具执行的数据流（executeToolCalls 三件套）
+
+#### 4.4.1 完整流程（sequential 模式）
+
+```
+executeToolCalls
+   │
+   ▼
+按 config.toolExecution 分发 ──────────┐
+   │                                    │
+   ▼                                    ▼
+executeToolCallsSequential        executeToolCallsParallel
+   │                                    │
+   ▼                                    │
+for 每个 toolCall in assistantMessage:  │
+   │                                    │
+   ├─① emit tool_execution_start        │
+   │                                    │
+   ▼                                    │
+prepareToolCall (L472)                  │
+   │                                    │
+   ├─ 在 context.tools 找 tool           │
+   │  └─ 没找到 → ImmediateOutcome(错误)│
+   │                                    │
+   ├─ prepareToolCallArguments          │
+   │  (tool.prepareArguments 可选)      │
+   │                                    │
+   ├─ validateToolArguments             │
+   │  └─ 失败(catch) → ImmediateOutcome │
+   │                                    │
+   ├─ config.beforeToolCall(ctx, signal)│
+   │  └─ {block:true} → ImmediateOutcome│
+   │                                    │
+   ▼                                    │
+   ┌────────────┬──────────────────────┐│
+   │ immediate  │ prepared             ││
+   │ (跳过执行) │                      ││
+   ▼            ▼                      ││
+   │      executePreparedToolCall(L524)││
+   │            │                      ││
+   │            ├─ tool.execute(        ││
+   │            │     id, args, signal, ││
+   │            │     onUpdate)         ││
+   │            │  └─ onUpdate →        ││
+   │            │     emit              ││
+   │            │     tool_execution_   ││
+   │            │     update            ││
+   │            │                       ││
+   │            ▼                       ││
+   │      finalizeExecutedToolCall(L561)│
+   │            │                       ││
+   │            ├─ config.afterToolCall ││
+   │            │  (可覆盖 content /    ││
+   │            │   details / isError)  ││
+   │            │                       ││
+   ▼────────────┴───────────────────────┘│
+   │                                    │
+   ▼                                    │
+emitToolCallOutcome (L604)              │
+   │                                    │
+   ├─ emit tool_execution_end           │
+   ├─ 构造 ToolResultMessage            │
+   ▼                                    │
+results.push(ToolResultMessage)         │
+                                        │
+for 循环结束 → 返回 results ─────────────┘
+```
+
+#### 4.4.2 prepare → execute → finalize 三件套职责
+
+| 阶段 | 函数 | 行号 | 职责 | 可拦截? |
+|---|---|---|---|---|
+| **prepare** | `prepareToolCall` | L472 | 找工具 / 参数预处理 / 校验 / **beforeToolCall** 拦截 | ✅ beforeToolCall |
+| **execute** | `executePreparedToolCall` | L524 | 调 `tool.execute()` + 把 onUpdate 回调转成事件 | ❌（工具内部） |
+| **finalize** | `finalizeExecutedToolCall` | L561 | **afterToolCall** 拦截 / 可覆盖 content/details/isError | ✅ afterToolCall |
+
+**为什么这么拆**——三件事的"语义层级"不同：
+
+- prepare：**问"能不能跑"**（权限 / 参数 / 工具是否存在）
+- execute：**跑**（纯粹的工具调用，跟权限脱钩）
+- finalize：**问"结果要不要改"**（脱敏 / 错误标记 / 审计）
+
+拆开的好处：
+1. **并行友好**——prepare 必须串行（beforeToolCall 可能依赖前一个的副作用），execute 可以并发，finalize 又可以串行（结果按顺序输出）
+2. **错误隔离**——prepare 失败不会污染 execute 的状态；execute 抛错被 catch，不会跑到 finalize 改结果
+3. **可观测**——三个阶段对应 `tool_execution_start/update/end` 三种事件，UI 完整看到生命周期
+
+#### 4.4.3 immediate vs prepared 两个出口
+
+```
+                prepareToolCall
+                      │
+          ┌───────────┴───────────┐
+          ▼                       ▼
+      immediate                prepared
+    (跳过 execute)          (走完整三件套)
+          │                       │
+          │                       ▼
+          │             executePreparedToolCall
+          │                       │
+          │                       ▼
+          │             finalizeExecutedToolCall
+          │                       │
+          └───────────┬───────────┘
+                      ▼
+              emitToolCallOutcome
+              (发 tool_execution_end
+               + 构造 ToolResultMessage)
+```
+
+**走 immediate 的三种情况**（都在 prepare 阶段）：
+
+| 触发条件 | 错误信息 |
+|---|---|
+| 工具名找不到 | `Tool ${name} not found` |
+| 参数校验抛错 | `error.message` 或 `String(error)` |
+| beforeToolCall 返回 `{block: true}` | `reason` 或 `"Tool execution was blocked"` |
+
+→ 走 immediate 的工具调用**仍然发 `tool_execution_start` 和 `tool_execution_end`**，所以 UI / 日志看到的事件流是完整的（不会突然消失一个 toolCall）。
+
+#### 4.4.4 sequential vs parallel 执行模式对比
+
+```
+sequential 模式 (config.toolExecution = "sequential"):
+toolCall[A] ─→ [start, prepare, execute, finalize, end] ─→ toolCall[B] ─→ [...]
+                                                              ↑ A 完全结束 B 才开始
+
+parallel 模式 (默认, config.toolExecution = "parallel"):
+┌──────────────────────────────────────────────────────┐
+│ Phase 1 (串行 preflight):                            │
+│   for A: emit start → prepare → 收集 runnableCalls  │
+│   for B: emit start → prepare → 收集 runnableCalls  │
+│   for C: emit start → prepare → 收集 runnableCalls  │
+│   (immediate 的当场 emit end, 不入 runnableCalls)    │
+│                                                      │
+│ Phase 2 (并发 execution):                            │
+│   runnableCalls.map(prepared => execute(prepared))  │
+│   ↑ 所有 execute 同时跑,不互相等待                   │
+│                                                      │
+│ Phase 3 (串行 finalize,按 assistant 源顺序):         │
+│   for A: await execute → finalize → push result     │
+│   for B: await execute → finalize → push result     │
+│   for C: await execute → finalize → push result     │
+└──────────────────────────────────────────────────────┘
+```
+
+| 维度 | sequential | parallel |
+|---|---|---|
+| 何时用 | 工具间有副作用依赖（A 改文件 B 才能读） | 工具互相独立（同时读 5 个文件） |
+| preflight | 串行 | 串行（一样） |
+| execute | 串行 | **并发** |
+| finalize | 串行 | 串行 |
+| 结果顺序 | toolCalls 原顺序 | toolCalls 原顺序（finalize 按源顺序 await） |
+| onError 隔离 | 一个失败不影响下个 | 一个失败不影响下个（catch 包住） |
+
+> [!important]
+> **parallel 不是全程并发**——只有 execute 阶段并发，prepare 和 finalize 仍然串行。
+> 原因：beforeToolCall 可能依赖前一个工具的副作用（比如日志累积），结果必须按 assistant 源顺序回写 transcript。
+
+#### 4.4.5 跟 _state / listeners / transcript 的关系
+
+```
+executeToolCalls 内部                              外部副作用
+   │
+   ├─ 每个工具调用的 3 种事件
+   │     tool_execution_start
+   │     tool_execution_update (0~N 次,流式)
+   │     tool_execution_end
+   │         │
+   │         ▼
+   │     emit() 调用
+   │         │
+   │         ├─→ 推给 listeners (UI / 日志 / 持久化)
+   │         └─→ (runLoop 自己不直接改 _state)
+   │
+   └─ 返回 ToolResultMessage[]
+         │
+         ▼
+     runLoop 拿到 results
+         │
+         ├─→ 塞进 transcript (下个 turn 喂给 LLM)
+         └─→ 通过 processEvents 改 _state.messages
+```
+
+> [!note]
+> executeToolCalls **不直接改 _state**——它只 emit 事件 + 返回结果。
+> 状态修改统一在 `runLoop` 里走 `processEvents`，单一入口。
+
 ---
 
 ## 5. 核心参数
