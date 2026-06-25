@@ -474,67 +474,13 @@ readTool           = createReadTool(process.cwd())
 
 ---
 
-## 10. 跟你学过的对照(完整映射)
-
-```
-learn-claude-code:
-  s10 System Prompt      → core/system-prompt.ts
-  s11 Recovery           → core/session-manager.ts
-  s12 Task System        → core/agent-session.ts + tools/
-  s13 Background Tasks   → modes/rpc/(异步任务基础)
-  s15/17 Agent Teams     → 通过 sdk.ts 多实例 spawn
-  s18 Worktree           → utils/git.ts
-  s19 MCP Plugin         → core/extensions/
-
-claw0:
-  s04 Channels           → modes/interactive + modes/rpc
-  s05 Gateway            → core/sdk.ts(路由到 Agent)
-  s06 Intelligence       → core/system-prompt.ts + compaction/
-  s07 Heartbeat          → core/agent-session.ts(steering)
-  s08 Delivery           → core/tools/(操作介质)
-  s09 Resilience         → core/session-manager.ts + auth-storage
-  s10 Concurrency        → utils/file-mutation-queue
-
-pi-mono:
-  pi-ai                  → 通过 messages.ts 转换 + sdk.ts streamFn
-  pi-agent-core          → sdk.ts new Agent(...) 创建实例
-```
-
----
-
-## 11. PuinClaw 改造路线
-
-```
-要让 pi-mono 变 PuinClaw,改这些就够:
-
-┌─────────────────────────────────────────────────┐
-│ 必改                                             │
-│  ├─ core/agent-session.ts    /goal 长跑循环     │
-│  ├─ modes/ 加 telegram-mode  IM 接入            │
-│  └─ tools/bash-executor.ts   Docker 沙盒接入    │
-├─────────────────────────────────────────────────┤
-│ 增益(规划中)                                   │
-│  ├─ extensions/ 加 reviewer    Agent Teams      │
-│  ├─ core/compaction/          长跑上下文治理    │
-│  └─ modes/rpc/ + webhook      GitHub PRD2PR     │
-└─────────────────────────────────────────────────┘
-
-→ 这一层的清晰分层让 PuinClaw 改造有明确"切入点"
-→ 不用动 pi-agent-core / pi-ai(下层稳定)
-```
-
----
-
-## 12. 面试要点
-
-### 必答清单
+## 10. Q&A 整理
 
 ```
 Q1: pi-coding-agent 在 pi-mono 里担什么角色?
 A: 三层架构最顶层 —— 产品层。封装 pi-agent-core(runtime)
    + pi-ai(LLM 适配) + 7 个工具 + 扩展系统 + 3 种 UI 模式
    + 会话/模型/凭证/auth 管理 + skills/resources/compaction 上下文治理。
-   ≈ Claude Code / Cursor / Aider 的等价物。
 
 Q2: createAgentSession() 干了什么?
 A: 唯一入口函数,装配 8 件事 ——
@@ -569,70 +515,34 @@ A: 双重限制(MAX_LINES + MAX_BYTES),4 种截断分支,
 Q6: read 工具怎么支持沙盒?
 A: ReadOperations 接口把 readFile 抽象出来,可注入 SSH 实现。
    LLM 仍调 read,但实际读的是远程机器。
-```
 
-### 加分点
+Q7: 工具可见性怎么决定?
+A: 工具有 selectedTools(激活)和 toolSnippets(有片段)两个维度。
+   激活但没有 snippet 的工具不会被介绍给 LLM,但仍可调用。
 
-```
-• 引用 Harness Engineering 三大支柱,把 coding-agent 定位为
-  Context + Harness + Workflow Engineering 的产品化整合
-• 提到 toolSnippets/guidelines 自描述工具 → Context Engineering 教科书
-• 提到 ReadOperations 接口是沙盒方案基础
-• 提到截断策略的 actionable 设计(对照传统软件的 error message)
-• 提到图片预处理(auto-resize)避免 LLM 拒收
-• 把 PuinClaw 改造路线跟代码层级对上号
-```
+Q8: 为什么 AGENTS.md 不需要工具调用就能进 prompt?
+A: resource-loader.ts 启动时自动发现并加载,通过 contextFiles
+   参数传给 buildSystemPrompt,直接拼到 prompt 末尾(L150-156)。
 
----
-
-## 13. 1 分钟电梯陈述
-
-```
-"pi-coding-agent 是 pi-mono 的产品层,41000 行 TS,
-封装 runtime + LLM 适配 + 7 个工具 + 扩展系统 + 3 种 UI 模式。
-
-入口是 sdk.ts 的 createAgentSession(),一个函数装配 5 个
-Managers + Agent + AgentSession,零配置能跑,全字段可注入。
-
-亮点 3 个:
-① system prompt 动态组装 —— Guidelines 按工具组合选,
-   工具自带 promptSnippet 自描述,AGENTS.md 自动注入
-② ToolDefinition 7 字段标准结构,read/write/edit/bash 都是变体
-③ ReadOperations 接口让工具能远程跑 —— 沙盒方案基础
-
-我的 PuinClaw 就基于这层改 —— /goal 长跑 + Telegram mode +
-Docker sandbox + reviewer extension,不动下层 pi-agent-core
-和 pi-ai,改造有明确切入点。"
+Q9: 怎么换默认 thinking level?
+A: 优先级 —— options.thinkingLevel > session 历史 > 
+   settingsManager.getDefaultThinkingLevel() > DEFAULT_THINKING_LEVEL。
+   model 不支持 reasoning → 强制 'off'。
 ```
 
 ---
 
-## 14. 关键资料
+## 11. 相关概念
 
-| 资料 | 内容 |
+| 概念 | 关系 |
 |---|---|
-| pi-mono 仓库 | `packages/coding-agent/src/` |
-| [[01 - pi-agent-core]] | 下层 runtime |
-| [[02 - pi-ai]] | 下层 LLM 适配 |
-| [[06 - Harness]] | 产品层 = Harness 思路的产品化 |
-| [[05 - Agentic Sandbox]] | ReadOperations 接口的延伸 |
-
----
-
-## 15. 阅读路线状态
-
-```
-pi-mono 三层阅读进度:
-   ✅ 01 - pi-agent-core(runtime 双循环 + 事件流)
-   ✅ 02 - pi-ai(11 家 LLM 适配 + StreamFunction)
-   ✅ 03 - pi-coding-agent(本篇,产品层)
-
-下一步深入方向(按需):
-   □ agent-session.ts        AgentSession 类细节
-   □ compaction/             上下文压缩(长跑必备)
-   □ extensions/             插件系统
-   □ tools/edit.ts           diff 模式工具
-   □ tools/bash.ts           沙盒相关
-```
-
-_Generated for PuinClaw 面试准备, 2026-06-25_
+| [[01 - pi-agent-core]] | 下层 runtime(双循环 + 事件流) |
+| [[02 - pi-ai]] | 下层 LLM 适配(11 家 provider) |
+| ToolDefinition | 所有工具的标准结构(7 字段) |
+| StreamFunction | sdk.ts L296-306 注入到 Agent 的 streamFn |
+| AGENTS.md / CLAUDE.md | resource-loader.ts 自动发现并注入 system prompt |
+| Skills | skills.ts 加载,formatSkillsForPrompt 渲染到 prompt |
+| Extensions | extensions/ 提供 before_provider_request 等钩子 |
+| ReadOperations | 工具远程化的抽象接口(SSH/Docker 基础) |
+| file-mutation-queue | write/edit 工具的串行化保障 |
+| compaction | 长会话上下文压缩(branch-summarization.ts) |
