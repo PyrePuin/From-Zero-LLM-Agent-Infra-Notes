@@ -450,102 +450,9 @@ flowchart LR
 > [!note]
 > 一般项目用 Docker 即可,**延迟瓶颈**才上 microVM / WASM。
 
-## 9. 中国大陆的 Docker 网络问题
+## 9. 面试要点
 
-### 9.1 现状(动态变化)
-
-| 层面        | 问题                                                    |
-| ----------- | ------------------------------------------------------- |
-| 物理        | Docker Hub 在境外 (`registry-1.docker.io`),国际带宽小    |
-| 政策        | 2024 年起 Docker Hub 被大面积封                          |
-| 连带        | 中科大、上海交大、网易、百度等**公共镜像站陆续关停**     |
-| ghcr/gcr    | GitHub Container Registry / Google gcr.io **基本不通**  |
-
-> [!warning] 时效性
-> 哪些加速器可用是**动态变化的**,今天能用的明天可能关。下面是常见应对思路,不是固定清单。
-
-### 9.2 两层问题与对策
-
-```mermaid
-%%{init: {"theme":"base", "themeVariables": {
-  "fontSize":"16px",
-  "fontFamily":"ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
-  "background":"#ffffff",
-  "primaryColor":"#eff6ff",
-  "primaryBorderColor":"#60a5fa",
-  "primaryTextColor":"#0f172a",
-  "lineColor":"#94a3b8"
-}}}%%
-flowchart TB
-    subgraph Build ["构建期:pull base image"]
-        B1["<b>问题</b><br/>node:20-slim 拉不动"] --> B2["<b>方案 A</b><br/>阿里云加速器"]
-        B1 --> B3["<b>方案 B</b><br/>境外 save / 国内 load"]
-        B1 --> B4["<b>方案 C</b><br/>自建 registry-proxy"]
-    end
-    subgraph Runtime ["运行期:容器内 npm/pip"]
-        R1["<b>问题</b><br/>npm install 拉不动"] --> R2["<b>方案</b><br/>换淘宝源 npmmirror"]
-        R3["<b>问题</b><br/>pip install 拉不动"] --> R4["<b>方案</b><br/>换清华源 tuna"]
-    end
-
-    class B1,R1,R3 warn
-    class B2,B3,B4,R2,R4 external
-
-    classDef external fill:#d1fae5,stroke:#10b981,stroke-width:2px,color:#064e3b
-    classDef warn fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#7f1d1d
-```
-
-### 9.3 加速器配置
-
-配 `/etc/docker/daemon.json`:
-
-```json
-{
-  "registry-mirrors": [
-    "https://xxxx.mirror.aliyuncs.com",
-    "https://docker.mirrors.ustc.edu.cn"
-  ]
-}
-```
-
-- 阿里云 / 腾讯云 / DaoCloud 都有个人加速器服务
-- 阿里云需要登录拿个人专属地址(容器镜像服务 → 镜像加速器)
-- ⚠️ 只能加速 **Docker Hub 官方镜像**,ghcr.io / gcr.io 不行
-
-### 9.4 容器内换国内源(关键)
-
-```dockerfile
-FROM node:20-slim
-
-# npm 换淘宝源
-RUN npm config set registry https://registry.npmmirror.com
-
-# pip 换清华源
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-
-USER node
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --production
-COPY . .
-CMD ["node", "index.js"]
-```
-
-### 9.5 离线搬运法(彻底解决)
-
-```bash
-# 境外机器
-docker pull node:20-slim
-docker save node:20-slim -o node.tar
-
-# 国内机器
-docker load -i node.tar
-```
-
-适合沙盒这种**镜像稳定不变**的场景——构建一次,到处搬运。
-
-## 10. 面试要点
-
-### 10.1 必答清单
+### 9.1 必答清单
 
 | Q                           | A 关键点                                                                 |
 | --------------------------- | ------------------------------------------------------------------------ |
@@ -556,7 +463,7 @@ docker load -i node.tar
 | 多 goal 怎么隔离?           | 每个 goal 一个独立容器 + 独立 workspace volume                            |
 | Docker 在国内能用吗?        | 镜像分发是痛点,用阿里云加速器 / 自建代理 / 离线搬运                       |
 
-### 10.2 加分点
+### 9.2 加分点
 
 - 知道 Firecracker / gVisor / WASM 等高级方案
 - 提到 `capability drop` 是核心
@@ -566,7 +473,10 @@ docker load -i node.tar
 - 提到"信任转移"——从开发者信任到零信任执行
 - 提到 prompt injection 让"信任模型"也不安全
 
-## 11. QA(面试模拟)
+## 10. QA
+
+> [!note]
+> 这一节是学习过程中**真实的问答脉络**——记录卡点、误解、深挖,而不是面试题模拟。面试要点的清单式速查在第 9 节。
 
 ### Q1:沙箱就是给新代码运行、与生产隔离的虚拟环境吧?完成代码验证?
 
@@ -612,11 +522,22 @@ Agent 实际干的事:
 - 公共加速器寿命短(中科大、上海交大等关停)
 - ghcr.io / gcr.io 基本不通
 
-实务做法分两层:
-1. **构建期**:用阿里云/腾讯云加速器,或自建 registry proxy,或离线 `docker save/load` 搬运
-2. **运行期**:容器内换 npm/pip 国内源(`registry.npmmirror.com` / `pypi.tuna.tsinghua.edu.cn`)
+实务做法分两层(必须分开处理):
 
-Agent 沙盒场景要把"构建期"和"运行期"两层网络分开处理。
+1. **构建期**(pull base image):配 `/etc/docker/daemon.json` 用阿里云/腾讯云加速器,或离线 `docker save/load` 搬运。
+
+    ```json
+    { "registry-mirrors": ["https://xxxx.mirror.aliyuncs.com"] }
+    ```
+
+2. **运行期**(容器内 `npm install` / `pip install`):换国内源。
+
+    ```dockerfile
+    RUN npm config set registry https://registry.npmmirror.com
+    RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    ```
+
+⚠️ 加速器清单是**动态变化的**,今天能用的明天可能关,需要定期查最新可用清单。
 
 ### Q5:Docker 隔离够安全吗?
 
@@ -628,7 +549,7 @@ Agent 沙盒场景要把"构建期"和"运行期"两层网络分开处理。
 > [!warning] 不要只看隔离强度
 > 还要考虑**性能**和**运维成本**。Docker 启动 500 ms / 占用 50 MB;Firecracker 启动 100 ms / 占用 100 MB 但运维复杂。一般项目 Docker 是最优解。
 
-## 12. 关键资料
+## 11. 关键资料
 
 | 资料                                                         | 内容                  |
 | ------------------------------------------------------------ | --------------------- |
@@ -639,7 +560,7 @@ Agent 沙盒场景要把"构建期"和"运行期"两层网络分开处理。
 | [OWASP Docker Top 10](https://owasp.org/www-project-docker-top-10/) | 常见漏洞              |
 | [Docker Hub 镜像加速器列表](https://gist.github.com/y0ngb1n/) | 国内可用加速器(动态)  |
 
-## 13. PuinClaw 实操清单
+## 12. PuinClaw 实操清单
 
 - [ ] 写 Dockerfile(slim + 非 root)
 - [ ] 写 docker run 安全配置(`--read-only` + `--cap-drop` 等)
