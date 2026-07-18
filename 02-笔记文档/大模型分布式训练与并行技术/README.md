@@ -11,7 +11,7 @@
 
 ## 二、Megatron 源码与训练系统
 
-5. [Megatron 源码解读 1：分布式环境初始化](https://zhuanlan.zhihu.com/p/629121480)
+5. [Megatron源码解读1--分布式环境初始化](./05-Megatron源码解读1--分布式环境初始化.md)（[原文](https://zhuanlan.zhihu.com/p/629121480)）
 6. [Megatron 源码解读 2：模型并行](https://zhuanlan.zhihu.com/p/634377071)
 7. [Megatron 源码解读 3：分布式混合精度训练](https://zhuanlan.zhihu.com/p/662700424)
 
