@@ -716,9 +716,6 @@ FP16 + Adam 中 optimizer 相关状态约占模型状态的 $12P/16P=75\%$，而
 
 集中式 DP 用主卡或 Server 聚合，简单但容易形成热点；DDP 用多进程集合通信均衡梯度同步，扩展性更好，但完整模型状态仍然复制；ZeRO 建立在 DDP 语义上，通过分片 optimizer states、gradients 和 parameters 降低单卡显存，代价是更复杂、更频繁且更依赖时序的通信。
 
-### Q11：ZeRO-R 的激活分片需要在 Megatron 中继续学习吗？
-
-需要。现在只需记住它优化的是模型并行组内重复保存的 activation checkpoint。等理解 Megatron 的 Column/Row Parallel Linear、TP group、Sequence Parallel 和激活布局后，就能具体判断哪些激活是复制的、沿哪个维度分片，以及何时需要 All-Gather。
 
 ## 参考资料
 
