@@ -198,7 +198,7 @@ GPU 3：完整 W16 + 完整 G + 第 3 片 W32/m/v
 $$
 M_{\mathrm{ZeRO1}}
 =
-4P+rac{12P}{N}
+4P+\frac{12P}{N}
 $$
 
 当 $N=4$：
@@ -278,9 +278,9 @@ GPU 3：完整 W16 + G[3] + optimizer states[3]
 $$
 M_{\mathrm{ZeRO2}}
 =
-2P+rac{2P}{N}+rac{12P}{N}
+2P+\frac{2P}{N}+\frac{12P}{N}
 =
-2P+rac{14P}{N}
+2P+\frac{14P}{N}
 $$
 
 ### 5.2 Reduce-Scatter 如何把梯度交给 owner
