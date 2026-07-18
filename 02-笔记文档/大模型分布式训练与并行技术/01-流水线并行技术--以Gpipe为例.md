@@ -3,7 +3,7 @@ type: concept
 status: learned
 domain: 大模型分布式训练
 created: 2026-07-17
-updated: 2026-07-18
+updated: 2026-07-19
 aliases: [Pipeline Parallelism, GPipe, 流水线并行]
 tags: [LLM, distributed-training, pipeline-parallelism, GPipe, micro-batch, activation-checkpointing]
 ---

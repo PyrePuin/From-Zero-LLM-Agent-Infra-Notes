@@ -114,6 +114,14 @@ Megatron 张量并行
 DeepSpeed ZeRO-2
 ```
 
+CodeGeeX 的模型结构和矩阵形状如下。这里不要求先读懂每一处细节；本篇只需要记住，它是一套 GPT 类 Transformer，后续必须由多张 GPU 协同训练。
+
+![CodeGeeX 模型结构与张量形状](./assets/05-Megatron源码解读1--分布式环境初始化/01-codegeex-model-architecture.jpg)
+
+训练配置图把模型规模、精度、优化器与并行规模集中列在了一起：
+
+![CodeGeeX 预训练配置](./assets/05-Megatron源码解读1--分布式环境初始化/02-codegeex-pretraining-config.jpg)
+
 对应的大规模训练配置为：
 
 ```text
@@ -132,6 +140,10 @@ GPU总数 = 8 × 1 × 192 = 1536
 分布式启动脚本：pretrain_codegeex.sh
 ```
 
+![预训练 Python 入口的位置](./assets/05-Megatron源码解读1--分布式环境初始化/03-pretrain-entry-and-script.jpg)
+
+![预训练启动脚本的位置](./assets/05-Megatron源码解读1--分布式环境初始化/04-pretrain-launch-script.jpg)
+
 启动脚本负责提供两类参数：
 
 - 模型参数：层数、hidden size、attention heads、batch size 等。
@@ -145,6 +157,10 @@ GPU总数 = 8 × 1 × 192 = 1536
 3. 构造并切分train/valid/test数据集
 4. 进入训练循环
 ```
+
+![pretrain 函数的四个模块](./assets/05-Megatron源码解读1--分布式环境初始化/05-pretrain-four-modules.jpg)
+
+这四步存在严格依赖关系：初始化先产出并行通信组；模型、优化器和数据集再读取这些组完成切分；最后训练循环才能按 TP、PP、DP 的职责执行通信与计算。
 
 本篇聚焦第一阶段。后面的模型构造代码会读取本篇创建好的并行 groups，才真正决定每个 rank 持有哪些 layers 和 tensor shards。
 
@@ -168,7 +184,53 @@ flowchart TD
 
 其中最关键的两层初始化是：
 
-### 2.3 全局初始化
+### 2.3 `_initialize_distributed()` 的代码总览
+
+先只看模块边界，不进入任何一段循环。旧版 Megatron 的核心初始化可以压缩成下面这份骨架：
+
+```python
+def _initialize_distributed():
+    args = get_args()
+
+    # 模块一：确定当前进程使用哪张 GPU
+    device_count = torch.cuda.device_count()
+    device = args.rank % device_count
+    torch.cuda.set_device(device)
+
+    # 模块二：让全部进程加入默认 World Group
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(
+            backend=args.distributed_backend,
+            world_size=args.world_size,
+            rank=args.rank,
+            init_method=args.distributed_init_method,
+        )
+
+    # 模块三：在 World Group 内创建 TP、PP、DP 等子组
+    if not mpu.model_parallel_is_initialized():
+        mpu.initialize_model_parallel(
+            args.tensor_model_parallel_size,
+            args.pipeline_model_parallel_size,
+            args.virtual_pipeline_model_parallel_size,
+        )
+
+    # 可选模块：启用 DeepSpeed 的激活分片等 ZeRO-R 能力
+    if args.deepspeed and args.deepspeed_activation_checkpointing:
+        setup_deepspeed_random_and_activation_checkpointing(args)
+```
+
+整段代码先拆成四个模块：
+
+| 模块 | 输入 | 产出 | 后续用途 |
+| --- | --- | --- | --- |
+| 进程绑定 GPU | `rank`、单机 GPU 数 | 当前 CUDA device | 保证一个进程只驱动目标 GPU |
+| World Group | 地址、端口、`world_size`、`rank` | 默认全局进程组 | 让所有进程互相发现 |
+| 并行子组 | TP size、PP size、推导出的 DP size | TP/PP/DP/MP/Embedding group | 限定各种 collective 和点对点通信范围 |
+| ZeRO-R 配置 | DeepSpeed 参数 | 激活检查点与激活分片配置 | 降低 residual memory |
+
+下面依次展开这些模块。这样阅读 `range()` 循环时，始终知道它正在为哪一种通信建立“通讯录”。
+
+### 2.4 全局初始化
 
 不同节点上的进程首先要通过一个共同 rendezvous 地址相互发现。常见配置来自：
 
@@ -203,7 +265,7 @@ torch.distributed.init_process_group(
 
 只有所有进程都成功加入 World Group，后面才可以安全地创建通信子组。
 
-### 2.4 并行子组初始化
+### 2.5 并行子组初始化
 
 ```python
 mpu.initialize_model_parallel(
@@ -329,6 +391,10 @@ t变化最快，d其次，p最慢。
 
 16 张 GPU 的布局为：
 
+![16 张 GPU 上的 MP、TP、PP、DP 分组总览](./assets/05-Megatron源码解读1--分布式环境初始化/06-parallel-groups-overview.jpg)
+
+把图中的位置改写成 rank 表格，就是：
+
 ```text
                     DP副本0        DP副本1
 
@@ -341,16 +407,12 @@ PP阶段3             [g12,g13]      [g14,g15]
 
 不同分组就是固定部分坐标、改变另一个坐标：
 
-$$
-\boxed{
-\begin{aligned}
-TP\text{组} &: 固定(p,d)，改变t \\
-PP\text{组} &: 固定(d,t)，改变p \\
-DP\text{组} &: 固定(p,t)，改变d \\
-MP\text{组} &: 固定d，遍历(p,t)
-\end{aligned}
-}
-$$
+| 分组 | 固定坐标 | 改变坐标 | 含义 |
+| --- | --- | --- | --- |
+| TP | $(p,d)$ | $t$ | 同一层的不同张量分片 |
+| PP | $(d,t)$ | $p$ | 同一流水线的不同 stages |
+| DP | $(p,t)$ | $d$ | 同一模型分片的不同数据副本 |
+| MP | $d$ | $(p,t)$ | 一套完整模型副本包含的全部模型分片 |
 
 这四行是整段初始化代码的数学本质。
 
@@ -378,7 +440,7 @@ $$
 所以：
 
 $$
-DP=rac{\text{world size}}{TP\times PP}
+DP=\frac{\text{world size}}{TP\times PP}
 $$
 
 代码首先检查能否整除：
@@ -402,7 +464,7 @@ data_parallel_size = world_size // (
 代入本例：
 
 $$
-DP=rac{16}{2\times4}=2
+DP=\frac{16}{2\times4}=2
 $$
 
 ### 5.1 计算 TP 组数
@@ -414,7 +476,7 @@ num_tensor_model_parallel_groups = (
 ```
 
 $$
-\text{TP组数}=rac{16}{2}=8
+\text{TP组数}=\frac{16}{2}=8
 $$
 
 ### 5.2 计算 PP 组数
@@ -426,7 +488,7 @@ num_pipeline_model_parallel_groups = (
 ```
 
 $$
-\text{PP组数}=rac{16}{4}=4
+\text{PP组数}=\frac{16}{4}=4
 $$
 
 这里的变量表示“PP 组的数量”，不是“PP stages 的数量”。
@@ -448,7 +510,7 @@ num_data_parallel_groups = (
 ```
 
 $$
-\text{DP组数}=rac{16}{2}=8
+\text{DP组数}=\frac{16}{2}=8
 $$
 
 最终得到：
@@ -538,22 +600,7 @@ for i in range(pipeline_model_parallel_size):
 
 ### 7.1 外层循环：定位 PP stage
 
-```python
-for i in range(pipeline_model_parallel_size):
-```
-
-本例中：
-
-```text
-i = 0,1,2,3
-```
-
-分别对应四个 pipeline stages。
-
-```python
-start_rank = i * num_pipeline_model_parallel_groups
-end_rank = (i + 1) * num_pipeline_model_parallel_groups
-```
+外层 `for i in range(pipeline_model_parallel_size)` 令 `i=0,1,2,3`，分别定位四个 pipeline stages。每次循环使用 `start_rank = i * num_pipeline_model_parallel_groups` 和 `end_rank = (i + 1) * num_pipeline_model_parallel_groups` 取得当前 stage 的连续 rank 区间。
 
 由于 `num_pipeline_model_parallel_groups=4`：
 
@@ -566,35 +613,7 @@ end_rank = (i + 1) * num_pipeline_model_parallel_groups
 
 ### 7.2 内层循环：固定 TP 分片位置
 
-```python
-for j in range(tensor_model_parallel_size):
-```
-
-本例中：
-
-```text
-j=0：TP分片0
-j=1：TP分片1
-```
-
-对于 PP stage 0：
-
-```text
-start_rank=0
-end_rank=4
-```
-
-当 `j=0`：
-
-```python
-range(0, 4, 2)  # [g0,g2]
-```
-
-当 `j=1`：
-
-```python
-range(1, 4, 2)  # [g1,g3]
-```
+内层 `for j in range(tensor_model_parallel_size)` 固定 TP 分片位置：`j=0` 表示 TP shard 0，`j=1` 表示 TP shard 1。以 PP stage 0 为例，此时 rank 区间是 `[0,4)`；`range(0,4,2)` 生成 `[g0,g2]`，`range(1,4,2)` 生成 `[g1,g3]`。
 
 最终生成：
 
@@ -605,23 +624,11 @@ PP阶段2：[g8,g10] [g9,g11]
 PP阶段3：[g12,g14] [g13,g15]
 ```
 
-这些组都满足：
-
-```text
-PP位置相同
-TP分片位置相同
-DP副本不同
-```
-
-因此同组 rank 持有语义相同的参数分片，可以同步梯度。
+这些组的 PP 位置相同、TP 分片位置相同，只有 DP 副本不同，因此同组 rank 持有语义相同的参数分片，可以同步梯度。
 
 ### 7.3 两个变量保存的内容不同
 
-```python
-all_data_parallel_group_ranks.append(list(ranks))
-```
-
-保存所有 DP 组的成员列表：
+`all_data_parallel_group_ranks.append(list(ranks))` 保存所有 DP 组的成员列表：
 
 ```python
 [
@@ -636,22 +643,7 @@ all_data_parallel_group_ranks.append(list(ranks))
 ]
 ```
 
-而：
-
-```python
-if rank in ranks:
-    _DATA_PARALLEL_GROUP = group
-```
-
-只保存当前进程所属的一个 group 句柄。
-
-例如在 g6 进程中：
-
-```text
-_DATA_PARALLEL_GROUP → [g4,g6]
-```
-
-它不是全部 DP 组的列表。
+而 `if rank in ranks: _DATA_PARALLEL_GROUP = group` 只保存当前进程所属的一个 group 句柄。例如在 g6 进程中，`_DATA_PARALLEL_GROUP` 指向 `[g4,g6]`，它不是全部 DP 组的列表。
 
 ---
 
@@ -993,6 +985,10 @@ DP 和 PP 也有对应查询函数。这样模型层不需要重新推导全局 
 
 ## 14. ZeRO-R：消除 TP 维度上的冗余激活
 
+先回到 TP MLP 的数据流。列并行会产生不同的局部分片，行并行再把各卡局部结果聚合成完整输出。图中绿色通信算子之后，各个 TP rank 会持有相同形状、相同数值的完整激活，这正是 residual memory 的冗余来源之一。
+
+![TP MLP 聚合后产生重复激活](./assets/05-Megatron源码解读1--分布式环境初始化/07-tensor-parallel-activation-redundancy.jpg)
+
 ZeRO-1、ZeRO-2、ZeRO-3 主要沿 DP 维度优化模型状态：
 
 | 阶段 | 分片内容 |
@@ -1001,7 +997,7 @@ ZeRO-1、ZeRO-2、ZeRO-3 主要沿 DP 维度优化模型状态：
 | ZeRO-2 | 优化器状态、梯度 |
 | ZeRO-3 | 优化器状态、梯度、参数 |
 
-ZeRO-R 关注的是残余显存，也就是 activation、临时 buffer、内存碎片等非模型状态。
+ZeRO-R 关注的是残余显存，也就是 activation、临时 buffer、内存碎片等非模型状态。它不是 ZeRO-1/2/3 之后的“Stage 4”，而是一组针对残余显存的优化手段。
 
 在普通 DP 组中，不同 rank 处理不同输入：
 
@@ -1117,7 +1113,7 @@ get_embedding_group()
 
 ---
 
-## 17. 易错点
+## 17. QA：代码阅读易错点
 
 ### 17.1 `num_pipeline_model_parallel_groups` 不是 PP size
 
@@ -1157,7 +1153,7 @@ PP group count = 4
 
 ---
 
-## 18. QA
+## 18. QA：阅读过程中的问题
 
 ### Q1：MP 在做什么？
 
@@ -1276,18 +1272,7 @@ Megatron 初始化可以概括成五句话：
 4. `new_group(ranks)` 创建 TP、PP、DP、MP 和 Embedding 通信子组。
 5. 后续模块查询这些 group handles，完成真正的模型切分与训练通信。
 
-最重要的分组规律是：
-
-$$
-\boxed{
-\begin{aligned}
-TP &: 固定(p,d)，改变t \\
-PP &: 固定(d,t)，改变p \\
-DP &: 固定(p,t)，改变d \\
-MP &: 固定d，遍历(p,t)
-\end{aligned}
-}
-$$
+最重要的分组规律是：TP 固定 $(p,d)$ 改变 $t$；PP 固定 $(d,t)$ 改变 $p$；DP 固定 $(p,t)$ 改变 $d$；MP 固定 $d$，遍历 $(p,t)$。
 
 只要能够从任意 rank 写出它的 $(p,d,t)$ 坐标，这段初始化代码就不再是一组难记的 `range()`，而只是对三维坐标的不同切片。
 

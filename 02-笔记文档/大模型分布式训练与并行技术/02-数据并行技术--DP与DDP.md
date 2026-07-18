@@ -3,7 +3,7 @@ type: concept
 status: learned
 domain: 大模型分布式训练
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 aliases: [Data Parallelism, DP, DDP, Ring-AllReduce, 数据并行]
 tags: [LLM, distributed-training, data-parallelism, DDP, parameter-server, ring-allreduce]
 ---

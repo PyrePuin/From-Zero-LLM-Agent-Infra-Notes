@@ -3,7 +3,7 @@ type: concept
 status: learned
 domain: distributed-training
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 tags:
   - LLM
   - distributed-training
@@ -276,7 +276,7 @@ backward 的 dX 是不同 hidden 分片，拼接关系
 忽略 bias，Transformer MLP 可以写成：
 
 $$
-H=\operatorname{GELU}(XA)
+H=\mathrm{GELU}(XA)
 $$
 
 $$
@@ -309,7 +309,7 @@ $$
 每个 rank 计算：
 
 $$
-H_i=\operatorname{GELU}(XA_i)
+H_i=\mathrm{GELU}(XA_i)
 $$
 
 形状变化为：
@@ -360,13 +360,11 @@ $$
 每个 rank 上：
 
 $$
-\boxed{
 (b,s,h)
 \longrightarrow
 \left(b,s,\frac{h'}{n}\right)
 \longrightarrow
 (b,s,h)
-}
 $$
 
 最后一个 $(b,s,h)$ 在 All-Reduce 前只是局部部分和 $Z_i$，归约后才是完整 MLP 输出。
@@ -423,7 +421,7 @@ $$
 
 $$
 O_j=
-\operatorname{Softmax}
+\mathrm{Softmax}
 \left(
 \frac{Q_jK_j^\mathsf{T}}{\sqrt{d_h}}
 \right)V_j
@@ -670,7 +668,6 @@ $$
 词表并行时，每个 rank：
 
 $$
-\boxed{
 (b,s,h)
 \longrightarrow
 \left(b,s,\frac{V}{n}\right)
@@ -678,7 +675,6 @@ $$
 (b,s)
 \longrightarrow
 ()
-}
 $$
 
 ### 8.7 Backward
@@ -694,7 +690,7 @@ $$
 正确类别所在 rank 在对应位置减去 1：
 
 $$
-dO_i=p_i-\operatorname{onehot}_i(y)
+dO_i=p_i-\mathrm{onehot}_i(y)
 $$
 
 输出词表投影对隐藏状态的梯度贡献为：

@@ -3,7 +3,7 @@ type: concept
 status: learned
 domain: 大模型分布式训练
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 aliases: [ZeRO, Zero Redundancy Optimizer, ZeRO-DP, ZeRO-R, 零冗余优化]
 tags: [LLM, distributed-training, ZeRO, DeepSpeed, mixed-precision, reduce-scatter, optimizer-state-sharding]
 ---
@@ -668,7 +668,7 @@ W32：Adam 实际更新
 optimizer.state[W32]：step、exp_avg、exp_avg_sq
 ```
 
-更新完成后执行 $W_{16}\leftarrow\operatorname{cast}(W_{32})$。但在原生 PyTorch `autocast` 中，模型参数通常本来就是 FP32，不一定额外存在一份长期 FP16 参数；是否存在独立 master copy 取决于混合精度实现。
+更新完成后执行 $W_{16}\leftarrow\mathrm{cast}(W_{32})$。但在原生 PyTorch `autocast` 中，模型参数通常本来就是 FP32，不一定额外存在一份长期 FP16 参数；是否存在独立 master copy 取决于混合精度实现。
 
 ### Q4：ZeRO-2 的 Reduce-Scatter 会缓存其他 GPU 的完整梯度吗？
 
