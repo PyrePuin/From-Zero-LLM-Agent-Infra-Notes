@@ -8,7 +8,7 @@ aliases: [Data Parallelism, DP, DDP, Ring-AllReduce, 数据并行]
 tags: [LLM, distributed-training, data-parallelism, DDP, parameter-server, ring-allreduce]
 ---
 
-# 02-数据并行技术：DP、DDP 与 Ring-AllReduce
+# 02-数据并行技术--DP与DDP
 
 > [!note]
 > 数据并行在每个设备上保留一份完整模型，把训练数据切成不同分片并行计算局部梯度，再同步梯度，使所有模型副本完成相同的参数更新。集中式参数服务器和去中心化 AllReduce 的核心区别，不是总共要搬多少梯度，而是通信压力落在谁身上、能否均匀利用网络。
@@ -86,7 +86,7 @@ $$
 5. 聚合结果被 pull 回所有 Worker。
 6. 各 Worker 更新出相同的参数。
 
-![集中式数据并行：各 GPU 计算局部梯度后集中聚合](./02-数据并行技术.assets/00-centralized-dp.jpg)
+![集中式数据并行：各 GPU 计算局部梯度后集中聚合](./assets/02-数据并行技术--DP与DDP/00-centralized-dp.jpg)
 
 图中的 `AllReduce` 方框实际表示一个中心化聚合位置。严格来说，AllReduce 是一种集合通信语义，不必存在中心节点；为了避免混淆，本文把这种结构称为“集中式梯度聚合”。
 
@@ -99,7 +99,7 @@ $$
 
 一个 Worker 或 Server 进程可以管理一张或多张 GPU；Server 也可以被切成多个 shard，并不天然等于“只有一张 GPU 的单点服务器”。
 
-![单 Server 参数服务器拓扑](./02-数据并行技术.assets/01-parameter-server.jpg)
+![单 Server 参数服务器拓扑](./assets/02-数据并行技术--DP与DDP/01-parameter-server.jpg)
 
 ### 2.3 真正的瓶颈在哪里
 
@@ -120,7 +120,7 @@ $$
 
 同步参数服务器要求 Worker 等待本轮聚合完成。异步方式允许 Worker 提交梯度后继续处理新数据，从而把通信等待时间转化为额外计算。
 
-![异步更新中 Worker 无需等待上一轮 push/pull 完全结束](./02-数据并行技术.assets/03-async-update.jpg)
+![异步更新中 Worker 无需等待上一轮 push/pull 完全结束](./assets/02-数据并行技术--DP与DDP/03-async-update.jpg)
 
 ### 3.2 梯度陈旧性
 
@@ -136,7 +136,7 @@ $\tau$ 称为 staleness（陈旧度或延迟步数）。常见策略包括：
 - **完全异步**：不限制 $\tau$，吞吐高但梯度可能非常陈旧。
 - **有界异步**：规定最大陈旧度，兼顾吞吐和优化稳定性。
 
-![同步、完全异步和有界异步](./02-数据并行技术.assets/04-staleness-modes.jpg)
+![同步、完全异步和有界异步](./assets/02-数据并行技术--DP与DDP/04-staleness-modes.jpg)
 
 ### 3.3 异步不等于扩大 batch
 
@@ -211,7 +211,7 @@ c₀+c₁+c₂+c₃
 d₀+d₁+d₂+d₃
 ```
 
-![AllReduce 的输入与最终目标](./02-数据并行技术.assets/05-allreduce-goal.jpg)
+![AllReduce 的输入与最终目标](./assets/02-数据并行技术--DP与DDP/05-allreduce-goal.jpg)
 
 > [!warning]
 > 这里切分的是待聚合的梯度张量或 gradient bucket，不是训练数据。训练数据早在各 rank 计算局部梯度之前就已经完成分片。
@@ -220,7 +220,7 @@ d₀+d₁+d₂+d₃
 
 把 $N$ 个 rank 排成逻辑环，每个 rank 只向下一个邻居发送，并从上一个邻居接收：
 
-![四个 rank 构成逻辑通信环](./02-数据并行技术.assets/06-reduce-scatter-ring.jpg)
+![四个 rank 构成逻辑通信环](./assets/02-数据并行技术--DP与DDP/06-reduce-scatter-ring.jpg)
 
 一次 Ring-AllReduce 分为两个阶段：
 
@@ -231,13 +231,13 @@ d₀+d₁+d₂+d₃
 
 每个通信 round 中，每个 rank 发送一个 chunk，同时接收并累加另一个 chunk。经过 $N-1$ 个 round，每个 chunk 都正好遍历需要参与求和的 rank。
 
-![Reduce-Scatter 第 1 轮](./02-数据并行技术.assets/07-reduce-scatter-round1.jpg)
+![Reduce-Scatter 第 1 轮](./assets/02-数据并行技术--DP与DDP/07-reduce-scatter-round1.jpg)
 
-![Reduce-Scatter 后续累加](./02-数据并行技术.assets/08-reduce-scatter-round2.jpg)
+![Reduce-Scatter 后续累加](./assets/02-数据并行技术--DP与DDP/08-reduce-scatter-round2.jpg)
 
 四个 rank 经过三轮后，每个 rank 各自持有一个已经完整求和的 chunk：
 
-![Reduce-Scatter 完成后的分片结果](./02-数据并行技术.assets/09-reduce-scatter-result.jpg)
+![Reduce-Scatter 完成后的分片结果](./assets/02-数据并行技术--DP与DDP/09-reduce-scatter-result.jpg)
 
 Reduce-Scatter 结束时，全局归约已经完成，但结果仍然分散在不同 rank 上。
 
@@ -245,13 +245,13 @@ Reduce-Scatter 结束时，全局归约已经完成，但结果仍然分散在�
 
 All-Gather 继续沿环传递已经完成求和的 chunk，此阶段只复制，不再做加法。
 
-![All-Gather 的起始状态](./02-数据并行技术.assets/10-allgather-start.jpg)
+![All-Gather 的起始状态](./assets/02-数据并行技术--DP与DDP/10-allgather-start.jpg)
 
 同样经过 $N-1$ 个 round 后，每个 rank 都收集到所有已归约 chunk：
 
-![All-Gather 中各归约分片沿环传播](./02-数据并行技术.assets/11-allgather-rounds.jpg)
+![All-Gather 中各归约分片沿环传播](./assets/02-数据并行技术--DP与DDP/11-allgather-rounds.jpg)
 
-![每个 rank 最终得到相同的完整聚合结果](./02-数据并行技术.assets/12-allgather-result.jpg)
+![每个 rank 最终得到相同的完整聚合结果](./assets/02-数据并行技术--DP与DDP/12-allgather-result.jpg)
 
 ---
 
@@ -347,7 +347,7 @@ $$
 
 参数服务器也可以通过多 Server 和参数分片降低热点：
 
-![多 Server 参数服务器将参数或梯度分片维护](./02-数据并行技术.assets/13-multi-server.jpg)
+![多 Server 参数服务器将参数或梯度分片维护](./assets/02-数据并行技术--DP与DDP/13-multi-server.jpg)
 
 所以不能简单得出“参数服务器一定落后”的结论。系统选择还取决于同步语义、参数稀疏性、容错需求、网络拓扑和训练框架。
 

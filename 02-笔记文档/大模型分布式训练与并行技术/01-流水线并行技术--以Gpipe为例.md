@@ -8,7 +8,7 @@ aliases: [Pipeline Parallelism, GPipe, 流水线并行]
 tags: [LLM, distributed-training, pipeline-parallelism, GPipe, micro-batch, activation-checkpointing]
 ---
 
-# 01-流水线并行技术：以 GPipe 为例
+# 01-流水线并行技术--以Gpipe为例
 
 > [!note]
 > 流水线并行先把模型按层切成多个 stage，再让多个 micro-batch 错峰通过这些 stage，以减少设备空转；GPipe 还结合 activation checkpointing（激活检查点/重物化），用额外重计算换取更低的激活显存。
@@ -64,7 +64,7 @@ GPU0：Layer 1 → Layer 2
 GPU1：Layer 3 → Layer 4
 ```
 
-![按层切分到两张 GPU](./01-流水线并行技术.assets/01-model-partition.jpg)
+![按层切分到两张 GPU](./assets/01-流水线并行技术--以Gpipe为例/01-model-partition.jpg)
 
 这里真正分配给 GPU 的是模型层，而不是某个固定的 micro-batch。后面引入 micro-batch 后，每个 micro-batch 都会依次经过全部 stage。
 
@@ -72,11 +72,11 @@ GPU1：Layer 3 → Layer 4
 
 如果一次只处理一个 batch，那么 GPU0 做完 forward 后，GPU1 才能开始；backward 又从最后一个 stage 依次返回：
 
-![朴素模型并行的 forward、backward 与统一更新](./01-流水线并行技术.assets/02-naive-forward-backward.jpg)
+![朴素模型并行的 forward、backward 与统一更新](./assets/01-流水线并行技术--以Gpipe为例/02-naive-forward-backward.jpg)
 
 灰色区域表示 GPU 没有执行有效计算的时间，也就是 pipeline bubble：
 
-![朴素模型并行中的 bubble](./01-流水线并行技术.assets/03-pipeline-bubble.jpg)
+![朴素模型并行中的 bubble](./assets/01-流水线并行技术--以Gpipe为例/03-pipeline-bubble.jpg)
 
 设：
 
@@ -113,7 +113,7 @@ $$
 
 计算 $W$ 的梯度仍然需要 forward 时的输入 $x$。ReLU、Attention、MLP、LayerNorm 等算子的 backward 也需要各自的输入、输出、mask 或统计量。因此 forward 中产生的激活不能立刻全部释放。
 
-![backward 需要各层 forward 的中间激活 z](./01-流水线并行技术.assets/04-intermediate-activations.jpg)
+![backward 需要各层 forward 的中间激活 z](./assets/01-流水线并行技术--以Gpipe为例/04-intermediate-activations.jpg)
 
 假设：
 
@@ -180,7 +180,7 @@ flowchart LR
 
 在 $T_4$，四张 GPU 同时工作，但处理的是不同 micro-batch 的不同模型层。
 
-![GPipe 中多个 micro-batch 的流水线调度](./01-流水线并行技术.assets/05-micro-batch-pipeline.jpg)
+![GPipe 中多个 micro-batch 的流水线调度](./assets/01-流水线并行技术--以Gpipe为例/05-micro-batch-pipeline.jpg)
 
 切分成 $M$ 个 micro-batch 后，在各 stage 计算时间相近、暂不考虑通信开销的简化模型中，bubble 占比为：
 
@@ -233,7 +233,7 @@ z₀ → Layer 1 → z₁ → Layer 2 → z₂ → Layer 3 → z₃
 3. 立即执行 Layer 3、2、1 的 backward。
 4. 中间激活使用完后释放。
 
-![重物化：只长期保存边界 z，内部 z 用完即释放](./01-流水线并行技术.assets/06-rematerialization.jpg)
+![重物化：只长期保存边界 z，内部 z 用完即释放](./assets/01-流水线并行技术--以Gpipe为例/06-rematerialization.jpg)
 
 Checkpoint 并不是让内部激活永远不存在，而是缩短它们的生命周期，并减少同时存活的 micro-batch 内部激活套数。
 
@@ -248,7 +248,7 @@ Checkpoint 并不是让内部激活永远不存在，而是缩短它们的生命
 
 Pipeline parallelism 与 activation checkpointing 是两个可以组合的维度：前者决定模型如何跨设备执行，后者决定 stage 内部哪些激活长期保留。下面的接口示例展示了 checkpointing 可以作为 pipeline stage 的配置项；具体参数名会随框架版本变化。
 
-![Pipeline API 中的 checkpoint 配置示例](./01-流水线并行技术.assets/07-pytorch-checkpoint.jpg)
+![Pipeline API 中的 checkpoint 配置示例](./assets/01-流水线并行技术--以Gpipe为例/07-pytorch-checkpoint.jpg)
 
 ### 4.3 为什么重计算不会指数增长
 
@@ -333,7 +333,7 @@ GPipe 的处理方式是：训练时使用各 micro-batch 的充分统计量完�
 
 ### 6.1 GPU 数量与可训练模型大小
 
-![GPipe 在 AmoebaNet 与 Transformer 上的模型规模实验](./01-流水线并行技术.assets/08-model-size-results.jpg)
+![GPipe 在 AmoebaNet 与 Transformer 上的模型规模实验](./assets/01-流水线并行技术--以Gpipe为例/08-model-size-results.jpg)
 
 实验结果可以归纳为三点：
 
@@ -345,11 +345,11 @@ GPipe 的处理方式是：训练时使用各 micro-batch 的充分统计量完�
 
 关闭高速互联、固定 $M=32$ 时，增加 GPU 仍能获得加速，但通常达不到严格线性：
 
-![关闭 NVLink 后的相对加速结果](./01-流水线并行技术.assets/09-no-nvlink-speed.jpg)
+![关闭 NVLink 后的相对加速结果](./assets/01-流水线并行技术--以Gpipe为例/09-no-nvlink-speed.jpg)
 
 打开高速互联并比较不同 $M$ 时：
 
-![不同 micro-batch 数量下的相对加速结果](./01-流水线并行技术.assets/10-microbatch-speed.jpg)
+![不同 micro-batch 数量下的相对加速结果](./assets/01-流水线并行技术--以Gpipe为例/10-microbatch-speed.jpg)
 
 - $M=1$ 时，流水线接近朴素模型并行，bubble 很大。
 - 增加 $M$ 后，GPU 利用率明显改善。
@@ -357,7 +357,7 @@ GPipe 的处理方式是：训练时使用各 micro-batch 的充分统计量完�
 
 ### 6.3 单 GPU 时间分布
 
-![GPipe 单 GPU 时间开销分布](./01-流水线并行技术.assets/11-time-breakdown.jpg)
+![GPipe 单 GPU 时间开销分布](./assets/01-流水线并行技术--以Gpipe为例/11-time-breakdown.jpg)
 
 图中约 65.6% 时间用于主要计算，约 22.5% 用于重计算；其余开销来自权重更新、负载不均、bubble 和 setup。这个结果直观展示了 activation checkpointing 的代价：显存下降，但需要额外计算。
 

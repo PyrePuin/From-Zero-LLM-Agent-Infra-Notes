@@ -8,7 +8,7 @@ aliases: [ZeRO, Zero Redundancy Optimizer, ZeRO-DP, ZeRO-R, 零冗余优化]
 tags: [LLM, distributed-training, ZeRO, DeepSpeed, mixed-precision, reduce-scatter, optimizer-state-sharding]
 ---
 
-# 03-ZeRO零冗余优化技术：从状态分片到残余显存管理
+# 03-数据并行技术--ZeRO与零冗余优化
 
 > [!note]
 > 普通数据并行在每张 GPU 上复制完整模型状态，ZeRO 则按“优化器状态 → 梯度 → 参数”的顺序逐级消除冗余。它仍然保持数据并行的计算语义，只在状态不需要完整存在时将其分片，需要计算时再通过集合通信恢复必要内容。
@@ -43,7 +43,7 @@ ZeRO 的核心原则可以概括为：
 
 训练显存可以分成两类：模型状态和残余状态。
 
-![训练显存由 Model States 与 Residual States 组成](./03-ZeRO零冗余优化技术.assets/00-storage-categories.jpg)
+![训练显存由 Model States 与 Residual States 组成](./assets/03-数据并行技术--ZeRO与零冗余优化/00-storage-categories.jpg)
 
 ### 1.1 Model States
 
@@ -98,7 +98,7 @@ ZeRO-1/2/3 降低模型状态冗余，但不代表激活和临时空间会自动
 
 在 DeepSpeed 常见的 FP16 + Adam 语境中，会长期维护一份低精度工作参数和一份 FP32 主参数分片：
 
-![FP16 参与 forward/backward，FP32 主参数与 Adam 状态负责更新](./03-ZeRO零冗余优化技术.assets/01-mixed-precision.jpg)
+![FP16 参与 forward/backward，FP32 主参数与 Adam 状态负责更新](./assets/03-数据并行技术--ZeRO与零冗余优化/01-mixed-precision.jpg)
 
 一次更新可以概括为：
 
@@ -158,7 +158,7 @@ $$
 | ZeRO-2 | $2P$ | $2P/N$ | $12P/N$ | $2P+14P/N$ |
 | ZeRO-3 | $2P/N$ | $2P/N$ | $12P/N$ | $16P/N$ |
 
-![ZeRO 从优化器状态、梯度到参数逐级消除数据并行冗余](./03-ZeRO零冗余优化技术.assets/12-zero-overview.jpg)
+![ZeRO 从优化器状态、梯度到参数逐级消除数据并行冗余](./assets/03-数据并行技术--ZeRO与零冗余优化/12-zero-overview.jpg)
 
 这里的公式描述长期模型状态。真实峰值还要考虑：
 
@@ -182,7 +182,7 @@ Adam 一阶动量 m
 Adam 二阶动量 v
 ```
 
-![ZeRO-1：每张 GPU 保存完整 W 和 G，只负责一个优化器状态分片](./03-ZeRO零冗余优化技术.assets/03-zero1-sharding.jpg)
+![ZeRO-1：每张 GPU 保存完整 W 和 G，只负责一个优化器状态分片](./assets/03-数据并行技术--ZeRO与零冗余优化/03-zero1-sharding.jpg)
 
 以 4 张 GPU 为例：
 
@@ -224,11 +224,11 @@ $$
 → 每个 rank 重新拥有一致的完整 W16
 ```
 
-![各 GPU 使用自己的优化器状态和对应梯度更新参数分片](./03-ZeRO零冗余优化技术.assets/04-zero1-update.jpg)
+![各 GPU 使用自己的优化器状态和对应梯度更新参数分片](./assets/03-数据并行技术--ZeRO与零冗余优化/04-zero1-update.jpg)
 
 这里不是直接用低精度梯度修改 FP16 参数，而是更新高精度 master 参数，再把结果复制到对应 FP16 参数分片。
 
-![ZeRO-1 中完整 FP16 工作权重与分片 FP32 权重、Adam 状态的显存生命周期](./03-ZeRO零冗余优化技术.assets/05-zero1-memory-snapshot.jpg)
+![ZeRO-1 中完整 FP16 工作权重与分片 FP32 权重、Adam 状态的显存生命周期](./assets/03-数据并行技术--ZeRO与零冗余优化/05-zero1-memory-snapshot.jpg)
 
 ### 4.3 ZeRO-1 的通信量为什么有两种答案
 
@@ -271,7 +271,7 @@ GPU 2：完整 W16 + G[2] + optimizer states[2]
 GPU 3：完整 W16 + G[3] + optimizer states[3]
 ```
 
-![ZeRO-2：参数仍完整，梯度与优化器状态按同一归属分片](./03-ZeRO零冗余优化技术.assets/07-zero2-sharding.jpg)
+![ZeRO-2：参数仍完整，梯度与优化器状态按同一归属分片](./assets/03-数据并行技术--ZeRO与零冗余优化/07-zero2-sharding.jpg)
 
 单卡长期模型状态显存为：
 
@@ -299,7 +299,7 @@ G_j
 \sum_{r=0}^{N-1}g_j^{(r)}
 $$
 
-![每个梯度分片被归约到对应的 optimizer owner](./03-ZeRO零冗余优化技术.assets/08-zero2-reduce-scatter.jpg)
+![每个梯度分片被归约到对应的 optimizer owner](./assets/03-数据并行技术--ZeRO与零冗余优化/08-zero2-reduce-scatter.jpg)
 
 以 4 张 GPU 为例，Ring Reduce-Scatter 需要：
 
@@ -368,7 +368,7 @@ GPU 2：W16[2] + G[2] + W32[2]/m[2]/v[2]
 GPU 3：W16[3] + G[3] + W32[3]/m[3]/v[3]
 ```
 
-![ZeRO-3：参数、梯度和优化器状态全部分片](./03-ZeRO零冗余优化技术.assets/10-zero3-sharding.jpg)
+![ZeRO-3：参数、梯度和优化器状态全部分片](./assets/03-数据并行技术--ZeRO与零冗余优化/10-zero3-sharding.jpg)
 
 理论长期模型状态显存为：
 
@@ -565,7 +565,7 @@ GPU：低精度参数、forward/backward、activation
 CPU：FP32 master 参数、Adam m/v、对应梯度与 optimizer update
 ```
 
-![ZeRO-Offload 将参数更新相关状态和计算迁移到 CPU](./03-ZeRO零冗余优化技术.assets/13-zero-offload.jpg)
+![ZeRO-Offload 将参数更新相关状态和计算迁移到 CPU](./assets/03-数据并行技术--ZeRO与零冗余优化/13-zero-offload.jpg)
 
 它用 CPU 内存容量换取 GPU 显存，但受 PCIe/NVLink、CPU 内存带宽和 CPU optimizer 吞吐限制。ZeRO-Infinity 再把可用存储层级扩展到 NVMe，使可训练模型规模继续扩大，同时也引入更复杂的预取、调度和 I/O 隐藏问题。
 
