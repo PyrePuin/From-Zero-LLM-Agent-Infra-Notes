@@ -6,7 +6,7 @@
 
 1. [流水线并行技术：以 GPipe 为例](./01-流水线并行技术.md)（[原文](https://zhuanlan.zhihu.com/p/613196255)）
 2. [数据并行技术：DP、DDP 与 Ring-AllReduce](./02-数据并行技术.md)（[原文](https://zhuanlan.zhihu.com/p/617133971)）
-3. [图解大模型训练之：数据并行下篇（ZeRO，零冗余优化）](https://zhuanlan.zhihu.com/p/618865052)
+3. [ZeRO 零冗余优化技术：从状态分片到残余显存管理](./03-ZeRO零冗余优化技术.md)（[原文](https://zhuanlan.zhihu.com/p/618865052)）
 4. [图解大模型系列之：张量模型并行，Megatron-LM](https://zhuanlan.zhihu.com/p/622212228)
 
 ## 二、Megatron 源码与训练系统
