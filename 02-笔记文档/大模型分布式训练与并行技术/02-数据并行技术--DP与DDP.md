@@ -47,15 +47,15 @@ tags: [LLM, distributed-training, data-parallelism, DDP, parameter-server, ring-
 
 当各数据分片大小相等，且每个局部 loss 都按样本取平均时，全局平均梯度为：
 
-$$
+```math
 g=\frac{1}{N}\sum_{i=0}^{N-1}g_i
-$$
+```
 
 每张 GPU 随后都执行相同的更新：
 
-$$
+```math
 W\leftarrow W-\eta g
-$$
+```
 
 只要初始参数、聚合梯度和优化器状态一致，更新后的模型副本就仍然一致。
 
@@ -126,9 +126,9 @@ $$
 
 异步 Worker 计算梯度时使用的可能不是 Server 当前参数。设 Server 已更新到 $W_t$，某个 Worker 提交的梯度却是在旧参数 $W_{t-\tau}$ 上计算的：
 
-$$
+```math
 g\left(W_{t-\tau}\right)
-$$
+```
 
 $\tau$ 称为 staleness（陈旧度或延迟步数）。常见策略包括：
 
@@ -267,24 +267,24 @@ All-Gather 继续沿环传递已经完成求和的 chunk，此阶段只复制，
 
 Reduce-Scatter 有 $N-1$ 个 round，每个 round 每张卡发送一个 chunk：
 
-$$
+```math
 V_{\mathrm{RS,send}}
 =(N-1)\frac{\Phi}{N}
-$$
+```
 
 All-Gather 同样有 $N-1$ 个 round：
 
-$$
+```math
 V_{\mathrm{AG,send}}
 =(N-1)\frac{\Phi}{N}
-$$
+```
 
 因此，一张 GPU 完整执行一次 Ring-AllReduce 的总发送量为：
 
-$$
+```math
 V_{\mathrm{send}}
 =2(N-1)\frac{\Phi}{N}
-$$
+```
 
 当 $N$ 很大时，它趋近于 $2\Phi$。
 
@@ -292,25 +292,25 @@ $$
 
 Ring 是对称的，单卡接收量与发送量相同：
 
-$$
+```math
 V_{\mathrm{recv}}
 =2(N-1)\frac{\Phi}{N}
-$$
+```
 
 如果把同一张卡的发送与接收相加，则网卡处理的双向数据量为：
 
-$$
+```math
 V_{\mathrm{send+recv}}
 =4(N-1)\frac{\Phi}{N}
-$$
+```
 
 如果只统计所有 GPU 的发送量，全系统精确值为：
 
-$$
+```math
 V_{\mathrm{global,send}}
 =N\times 2(N-1)\frac{\Phi}{N}
 =2(N-1)\Phi
-$$
+```
 
 它在大 $N$ 下才可以近似写成 $2N\Phi$。讨论“通信量”时必须先声明口径，否则同一过程可能相差一倍甚至更多。
 
@@ -325,10 +325,10 @@ All-Gather：    3 轮 × 100 MB = 300 MB
 
 单卡完整 AllReduce 的发送量为：
 
-$$
+```math
 2\times\frac{3}{4}\times400
 =600\ \mathrm{MB}
-$$
+```
 
 同一张卡还会接收 $600\ \mathrm{MB}$；若统计收发总量，则为 $1200\ \mathrm{MB}$。
 
@@ -430,29 +430,29 @@ ZeRO 不是简单把模型按算子切开的张量并行。它仍然保持数据
 
 若每条有效链路带宽为 $B$，忽略计算、协议开销和拓扑差异，在带宽占主导的理想情况下：
 
-$$
+```math
 T_{\mathrm{central}}
 \gtrsim
 \frac{2(N-1)\Phi}{B}
-$$
+```
 
 而 Ring-AllReduce 的带宽项约为：
 
-$$
+```math
 T_{\mathrm{ring}}
 \approx
 \frac{2(N-1)\Phi}{NB}
-$$
+```
 
 Ring 还需要经历 $2(N-1)$ 个通信 round，所以更完整的性能模型还要加入每轮启动延迟 $\alpha$：
 
-$$
+```math
 T_{\mathrm{ring}}
 \approx
 2(N-1)\alpha
 +
 \frac{2(N-1)\Phi}{NB}
-$$
+```
 
 因此，Ring-AllReduce 更适合梯度这类大张量：此时带宽项占主导，分散通信热点的收益明显；对于很小的张量，通信轮数带来的延迟可能反而更重要。
 

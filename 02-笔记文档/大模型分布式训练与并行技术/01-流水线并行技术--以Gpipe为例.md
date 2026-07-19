@@ -87,9 +87,9 @@ GPU1：Layer 3 → Layer 4
 
 朴素调度中， bubble 占比为：
 
-$$
+```math
 \frac{K-1}{K}
-$$
+```
 
 当 $K$ 增大时，这个比例趋近于 1。直观上，stage 越多，单个 batch 串行穿过整条流水线时，等待的设备就越多。
 
@@ -103,13 +103,13 @@ x → Layer 1 → z₁ → Layer 2 → z₂ → Layer 3 → z₃ → Loss
 
 backward 并不是只靠最终的 Loss 就能计算全部梯度。例如线性层：
 
-$$
+```math
 z=Wx,
 \qquad
 \frac{\partial \mathcal L}{\partial W}
 =
 \frac{\partial \mathcal L}{\partial z}x^T
-$$
+```
 
 计算 $W$ 的梯度仍然需要 forward 时的输入 $x$。ReLU、Attention、MLP、LayerNorm 等算子的 backward 也需要各自的输入、输出、mask 或统计量。因此 forward 中产生的激活不能立刻全部释放。
 
@@ -124,15 +124,15 @@ $$
 
 忽略常数和具体算子的额外张量，每张卡的内部激活量可粗略写成：
 
-$$
+```math
 O\left(N\times\frac{L}{K}\times d\right)
-$$
+```
 
 对于 Transformer，如果 $N$ 只是 batch size，还应显式计入序列长度 $S$：
 
-$$
+```math
 O\left(N S\times\frac{L}{K}\times d\right)
-$$
+```
 
 真实 Transformer 还可能保存 Q/K/V、Attention 中间量、MLP 激活、Dropout mask 和 LayerNorm 统计量，所以该公式只是理解量级的简化模型。
 
@@ -144,9 +144,9 @@ $$
 
 设一次参数更新对应的 mini-batch 大小为 $N$，把它切成 $M$ 份，则每个 micro-batch 大小为：
 
-$$
+```math
 \frac{N}{M}
-$$
+```
 
 例如：
 
@@ -184,9 +184,9 @@ flowchart LR
 
 切分成 $M$ 个 micro-batch 后，在各 stage 计算时间相近、暂不考虑通信开销的简化模型中，bubble 占比为：
 
-$$
+```math
 O\left(\frac{K-1}{K+M-1}\right)
-$$
+```
 
 当 $M$ 增大时，启动和排空阶段的 bubble 会被更多有效计算摊薄。GPipe 的实验观察到，当 $M\ge 4K$ 时，bubble 开销已经接近可以忽略；这是特定实验条件下的经验结论，不是对所有模型和硬件都成立的保证，实际配置仍要结合算子效率和通信开销调优。
 
@@ -278,7 +278,7 @@ Pipeline parallelism 与 activation checkpointing 是两个可以组合的维度
 
 设 mini-batch 包含 $N$ 个样本，被切为 $M$ 个 micro-batch；stage 边界激活宽度为 $d_b$，stage 内部每层激活的简化宽度为 $d$。两部分分别为：
 
-$$
+```math
 \begin{aligned}
 \text{入口 checkpoint}
 &=
@@ -288,33 +288,33 @@ M\times\frac{N}{M}\times d_b
 &\approx
 \frac{N}{M}\times\frac{L}{K}\times d.
 \end{aligned}
-$$
+```
 
 因此：
 
-$$
+```math
 O\left(
 Nd_b+
 \frac{N}{M}\times\frac{L}{K}\times d
 \right)
-$$
+```
 
 如果近似认为 $d_b=d$，可以写成：
 
-$$
+```math
 O\left[
 Nd\left(1+\frac{L}{MK}\right)
 \right]
-$$
+```
 
 对于 batch size 为 $N$、序列长度为 $S$ 的 Transformer，更接近：
 
-$$
+```math
 O\left(
 NSd_b+
 \frac{NS}{M}\times\frac{L}{K}\times d
 \right)
-$$
+```
 
 若换算为字节，还要乘以每个元素的字节数，并考虑 Attention、MLP、LayerNorm 等算子的额外保存量。
 
@@ -426,9 +426,9 @@ x → Layer 1 → z₁ → Layer 2 → z₂ → Layer 3 → z₃
 
 第一项统计所有 micro-batch 的 stage 入口 checkpoint 总量。每个入口对应 $N/M$ 个样本，共有 $M$ 个：
 
-$$
+```math
 M\times\frac{N}{M}=N
-$$
+```
 
 但这只统计了样本数，没有统计每个样本的激活宽度，所以还不能直接作为激活元素数量或显存大小。
 
@@ -436,9 +436,9 @@ $$
 
 更准确地说，不是只多保存“一个”中间激活，而是在 backward 重计算时临时保存当前 segment 所需的所有内部激活。公式第二项：
 
-$$
+```math
 \frac{N}{M}\times\frac{L}{K}\times d
-$$
+```
 
 就是对“当前一个 micro-batch 的当前 stage 内部激活”的简化估计。
 
@@ -446,21 +446,21 @@ $$
 
 对。如果 $N$ 是 mini-batch 的样本数量，且 stage 入口激活宽度也是 $d$，量纲一致的写法至少应为：
 
-$$
+```math
 O\left(
 Nd+
 \frac{N}{M}\times\frac{L}{K}\times d
 \right)
-$$
+```
 
 更一般地，如果边界宽度是 $d_b$，则应写成：
 
-$$
+```math
 O\left(
 Nd_b+
 \frac{N}{M}\times\frac{L}{K}\times d
 \right)
-$$
+```
 
 Transformer 还应把序列长度 $S$ 计入激活形状。
 

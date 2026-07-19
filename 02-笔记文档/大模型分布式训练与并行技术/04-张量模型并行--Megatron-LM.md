@@ -27,9 +27,9 @@ tags:
 
 全文默认采用矩阵右乘形式：
 
-$$
+```math
 Y=XW
-$$
+```
 
 不同实现可能把权重存成转置形式，因此“行并行”“列并行”的代码命名要结合实际权重布局判断。这里始终以公式中的 $W$ 为准。
 
@@ -81,28 +81,28 @@ GPU 3：Layer L 的参数分片 3
 
 输入和权重形状为：
 
-$$
+```math
 X\in\mathbb{R}^{b\times s\times h},
 \qquad
 W\in\mathbb{R}^{h\times h'}
-$$
+```
 
 输出为：
 
-$$
+```math
 Y=XW
 \in\mathbb{R}^{b\times s\times h'}
-$$
+```
 
 为了简化推导，把前两个维度合并为 $T=b\times s$。不切分时，已知上游梯度 $dY$：
 
-$$
+```math
 dW=X^\mathsf{T}dY
-$$
+```
 
-$$
+```math
 dX=dYW^\mathsf{T}
-$$
+```
 
 张量并行不会改变这两个公式，只是把其中的项分配到不同 GPU，再通过拼接或求和恢复数学上相同的结果。
 
@@ -114,34 +114,34 @@ $$
 
 沿 $W$ 的输出维度 $h'$ 切分：
 
-$$
+```math
 W=
 \left[
 W_0,W_1,\ldots,W_{n-1}
 \right]
-$$
+```
 
 其中：
 
-$$
+```math
 W_i\in\mathbb{R}^{h\times h'/n}
-$$
+```
 
 每个 rank 都拿到完整输入 $X$，本地计算：
 
-$$
+```math
 Y_i=XW_i
 \in\mathbb{R}^{b\times s\times h'/n}
-$$
+```
 
 完整输出是沿最后一维拼接：
 
-$$
+```math
 Y=
 \left[
 Y_0,Y_1,\ldots,Y_{n-1}
 \right]
-$$
+```
 
 如果下一个算子能够直接消费分片 $Y_i$，就不需要立即 All-Gather 完整 $Y$。
 
@@ -151,30 +151,30 @@ $$
 
 上游梯度也沿输出维度分片：
 
-$$
+```math
 dY=
 \left[
 dY_0,dY_1,\ldots,dY_{n-1}
 \right]
-$$
+```
 
 每个 rank 的权重梯度为：
 
-$$
+```math
 dW_i=X^\mathsf{T}dY_i
-$$
+```
 
 这些 $dW_i$ 对应不同权重列，不需要相加。但是每个输出分片都依赖完整输入 $X$，rank $i$ 只能算出：
 
-$$
+```math
 dX_i=dY_iW_i^\mathsf{T}
-$$
+```
 
 完整输入梯度为：
 
-$$
+```math
 dX=\sum_{i=0}^{n-1}dX_i
-$$
+```
 
 因此列并行线性层在 backward 回到复制输入时，需要对 $dX_i$ 做 All-Reduce。
 
@@ -194,7 +194,7 @@ backward 的 dX 是不同贡献，求和关系
 
 沿 $W$ 的输入维度 $h$ 切分：
 
-$$
+```math
 W=
 \begin{bmatrix}
 W_0\\
@@ -202,37 +202,37 @@ W_1\\
 \vdots\\
 W_{n-1}
 \end{bmatrix}
-$$
+```
 
 其中：
 
-$$
+```math
 W_i\in\mathbb{R}^{h/n\times h'}
-$$
+```
 
 输入也沿 hidden 维对应切分：
 
-$$
+```math
 X=
 \left[
 X_0,X_1,\ldots,X_{n-1}
 \right],
 \qquad
 X_i\in\mathbb{R}^{b\times s\times h/n}
-$$
+```
 
 每个 rank 计算：
 
-$$
+```math
 Z_i=X_iW_i
 \in\mathbb{R}^{b\times s\times h'}
-$$
+```
 
 每个 $Z_i$ 的形状都与完整输出相同，但数值上只是部分和：
 
-$$
+```math
 Y=\sum_{i=0}^{n-1}Z_i
-$$
+```
 
 因此基础行并行层在 forward 需要 All-Reduce。
 
@@ -242,22 +242,22 @@ $$
 
 每个 rank 独立计算：
 
-$$
+```math
 dW_i=X_i^\mathsf{T}dY
-$$
+```
 
-$$
+```math
 dX_i=dYW_i^\mathsf{T}
-$$
+```
 
 $dX_i$ 对应输入 hidden 维的不同分片：
 
-$$
+```math
 dX=
 \left[
 dX_0,dX_1,\ldots,dX_{n-1}
 \right]
-$$
+```
 
 这里是拼接关系，不是求和关系，所以行并行层的这一段 backward 不需要额外 All-Reduce。
 
@@ -275,23 +275,23 @@ backward 的 dX 是不同 hidden 分片，拼接关系
 
 忽略 bias，Transformer MLP 可以写成：
 
-$$
+```math
 H=\mathrm{GELU}(XA)
-$$
+```
 
-$$
+```math
 Z=HB
-$$
+```
 
 其中：
 
-$$
+```math
 A\in\mathbb{R}^{h\times h'},
 \qquad
 B\in\mathbb{R}^{h'\times h},
 \qquad
 h'\approx4h
-$$
+```
 
 ![普通 Transformer MLP](./assets/04-张量模型并行--Megatron-LM/06-mlp-baseline.jpg)
 
@@ -299,26 +299,26 @@ $$
 
 把 $A$ 按列切分：
 
-$$
+```math
 A=
 \left[
 A_0,A_1,\ldots,A_{n-1}
 \right]
-$$
+```
 
 每个 rank 计算：
 
-$$
+```math
 H_i=\mathrm{GELU}(XA_i)
-$$
+```
 
 形状变化为：
 
-$$
+```math
 (b,s,h)
 \longrightarrow
 \left(b,s,\frac{h'}{n}\right)
-$$
+```
 
 GELU 是逐元素函数，各 rank 可以直接对本地分片执行，无需恢复完整 $H$。
 
@@ -326,7 +326,7 @@ GELU 是逐元素函数，各 rank 可以直接对本地分片执行，无需恢
 
 把 $B$ 按行切分：
 
-$$
+```math
 B=
 \begin{bmatrix}
 B_0\\
@@ -336,20 +336,20 @@ B_{n-1}
 \end{bmatrix},
 \qquad
 B_i\in\mathbb{R}^{h'/n\times h}
-$$
+```
 
 第一层的输出分片 $H_i$ 恰好对应第二层的输入分片。每个 rank 直接计算：
 
-$$
+```math
 Z_i=H_iB_i
 \in\mathbb{R}^{b\times s\times h}
-$$
+```
 
 完整输出为：
 
-$$
+```math
 Z=\sum_{i=0}^{n-1}Z_i
-$$
+```
 
 因此最后执行一次 All-Reduce，所有 TP ranks 得到相同的完整 $Z$。
 
@@ -359,13 +359,13 @@ $$
 
 每个 rank 上：
 
-$$
+```math
 (b,s,h)
 \longrightarrow
 \left(b,s,\frac{h'}{n}\right)
 \longrightarrow
 (b,s,h)
-$$
+```
 
 最后一个 $(b,s,h)$ 在 All-Reduce 前只是局部部分和 $Z_i$，归约后才是完整 MLP 输出。
 
@@ -373,12 +373,12 @@ $$
 
 如果在 GELU 后恢复：
 
-$$
+```math
 H=
 \left[
 H_0,\ldots,H_{n-1}
 \right]
-$$
+```
 
 每张 GPU 都会重新持有形状 $(b,s,h')$ 的宽激活，既增加通信，也抹掉激活分片的显存收益。列并行 $A$ 接行并行 $B$，就是为了让 $A$ 的输出分片直接成为 $B$ 的输入分片。
 
@@ -391,9 +391,9 @@ $$
 3. 列并行 $A$ 计算 $dA_i$ 和输入梯度贡献 $dX_i$。
 4. 对 $dX_i$ 做 All-Reduce：
 
-$$
+```math
 dX=\sum_idX_i
-$$
+```
 
 所以一个 MLP 中，forward 在行并行输出处有一次 All-Reduce，backward 在列并行输入梯度处有一次 All-Reduce。
 
@@ -405,27 +405,27 @@ $$
 
 设注意力头数为 $a$，每个 head 维度为 $d_h$：
 
-$$
+```math
 h=a\times d_h
-$$
+```
 
 不同 heads 可以独立计算：
 
-$$
+```math
 Q_j=XW_j^Q,
 \qquad
 K_j=XW_j^K,
 \qquad
 V_j=XW_j^V
-$$
+```
 
-$$
+```math
 O_j=
 \mathrm{Softmax}
 \left(
 \frac{Q_jK_j^\mathsf{T}}{\sqrt{d_h}}
 \right)V_j
-$$
+```
 
 ![普通 Multi-Head Attention](./assets/04-张量模型并行--Megatron-LM/09-multi-head-attention-baseline.jpg)
 
@@ -439,16 +439,16 @@ Q、K、V 投影矩阵沿输出维度切分，每个 TP rank 获得一组完整 
 
 各 rank 得到一部分 head 输出：
 
-$$
+```math
 O=
 \left[
 O_0,O_1,\ldots,O_{n-1}
 \right]
-$$
+```
 
 输出投影矩阵按输入维度行切：
 
-$$
+```math
 W^O=
 \begin{bmatrix}
 W_0^O\\
@@ -456,19 +456,19 @@ W_1^O\\
 \vdots\\
 W_{n-1}^O
 \end{bmatrix}
-$$
+```
 
 每个 rank 计算：
 
-$$
+```math
 Y_i=O_iW_i^O
-$$
+```
 
 最终通过 All-Reduce 得到：
 
-$$
+```math
 Y=\sum_iY_i
-$$
+```
 
 ![Self-Attention 中 QKV 列并行与输出投影行并行](./assets/04-张量模型并行--Megatron-LM/11-self-attention-tensor-parallel.jpg)
 
@@ -491,15 +491,15 @@ backward 回到复制输入时还需要一次 All-Reduce。
 
 Embedding 权重为：
 
-$$
+```math
 E\in\mathbb{R}^{V\times h}
-$$
+```
 
 沿词表维度切分：
 
-$$
+```math
 E_i\in\mathbb{R}^{V/n\times h}
-$$
+```
 
 对输入 token $x$：
 
@@ -509,9 +509,9 @@ $$
 
 一个 token 只属于一个词表分片，因此求和后就是完整 embedding：
 
-$$
+```math
 H\in\mathbb{R}^{b\times s\times h}
-$$
+```
 
 ![词表并行输入 Embedding](./assets/04-张量模型并行--Megatron-LM/13-input-embedding.jpg)
 
@@ -519,24 +519,24 @@ $$
 
 输出权重：
 
-$$
+```math
 W_{\mathrm{vocab}}
 \in\mathbb{R}^{V\times h}
-$$
+```
 
 普通 logits 为：
 
-$$
+```math
 O=HW_{\mathrm{vocab}}^\mathsf{T}
 \in\mathbb{R}^{b\times s\times V}
-$$
+```
 
 沿词表维度切分权重后，每个 rank 只产生：
 
-$$
+```math
 O_i=HW_i^\mathsf{T}
 \in\mathbb{R}^{b\times s\times V/n}
-$$
+```
 
 ![输出词表投影沿 vocabulary 维度切分](./assets/04-张量模型并行--Megatron-LM/14-output-embedding.jpg)
 
@@ -550,23 +550,23 @@ $$
 
 对于某个 token，正确 token id 为 $y$：
 
-$$
+```math
 L
 =
 -\log
 \frac{\exp(o_y)}
 {\sum_{j=0}^{V-1}\exp(o_j)}
-$$
+```
 
 为了数值稳定，令：
 
-$$
+```math
 m=\max_j o_j
-$$
+```
 
 则：
 
-$$
+```math
 L
 =
 \log
@@ -574,7 +574,7 @@ L
 \sum_{j=0}^{V-1}\exp(o_j-m)
 \right)
 +m-o_y
-$$
+```
 
 ![普通 Cross Entropy 需要完整 vocabulary logits](./assets/04-张量模型并行--Megatron-LM/15-cross-entropy-baseline.jpg)
 
@@ -584,65 +584,65 @@ Cross Entropy 真正需要的是全词表最大值、稳定指数和以及正确
 
 每个 rank 在自己的词表分片计算：
 
-$$
+```math
 m_i
 =
 \max_{j\in\mathcal{V}_i}o_j
 \in\mathbb{R}^{b\times s}
-$$
+```
 
 执行 All-Reduce MAX：
 
-$$
+```math
 m=\max_i m_i
-$$
+```
 
 ### 8.3 全局指数和
 
 每个 rank 计算：
 
-$$
+```math
 q_i
 =
 \sum_{j\in\mathcal{V}_i}
 \exp(o_j-m)
 \in\mathbb{R}^{b\times s}
-$$
+```
 
 执行 All-Reduce SUM：
 
-$$
+```math
 q=\sum_iq_i
 =
 \sum_{j=0}^{V-1}\exp(o_j-m)
-$$
+```
 
 ### 8.4 正确类别 logit
 
 每个 rank 判断标签 $y$ 是否属于自己的词表范围：
 
-$$
+```math
 t_i=
 \begin{cases}
 o_y,&y\in\mathcal{V}_i\\
 0,&y\notin\mathcal{V}_i
 \end{cases}
-$$
+```
 
 执行 All-Reduce SUM：
 
-$$
+```math
 t=\sum_it_i=o_y
-$$
+```
 
 ### 8.5 得到 loss
 
 每个 rank 都能计算：
 
-$$
+```math
 L=\log q+m-t
 \in\mathbb{R}^{b\times s}
-$$
+```
 
 再对有效 token 求和或求平均，得到标量 loss。
 
@@ -655,7 +655,7 @@ $$
 
 普通单卡：
 
-$$
+```math
 (b,s,h)
 \longrightarrow
 (b,s,V)
@@ -663,11 +663,11 @@ $$
 (b,s)
 \longrightarrow
 ()
-$$
+```
 
 词表并行时，每个 rank：
 
-$$
+```math
 (b,s,h)
 \longrightarrow
 \left(b,s,\frac{V}{n}\right)
@@ -675,35 +675,35 @@ $$
 (b,s)
 \longrightarrow
 ()
-$$
+```
 
 ### 8.7 Backward
 
 每个 rank 计算自己的 softmax 概率分片：
 
-$$
+```math
 p_i
 =
 \frac{\exp(O_i-m)}{q}
-$$
+```
 
 正确类别所在 rank 在对应位置减去 1：
 
-$$
+```math
 dO_i=p_i-\mathrm{onehot}_i(y)
-$$
+```
 
 输出词表投影对隐藏状态的梯度贡献为：
 
-$$
+```math
 dH_i=dO_iW_i
-$$
+```
 
 完整梯度需要求和：
 
-$$
+```math
 dH=\sum_idH_i
-$$
+```
 
 这次 All-Reduce 属于词表并行输出线性层的 backward。
 
@@ -713,17 +713,17 @@ $$
 
 设形状 $(b,s,h)$ 的激活或梯度张量字节数为：
 
-$$
+```math
 \Phi=bsh\times\text{bytes-per-element}
-$$
+```
 
 一次 Ring All-Reduce 的单 rank 精确发送量为：
 
-$$
+```math
 V_{\mathrm{AR}}
 =
 2\frac{n-1}{n}\Phi
-$$
+```
 
 一个 MLP 完整 forward + backward 有两次 All-Reduce：
 
@@ -734,11 +734,11 @@ $$
 
 所以：
 
-$$
+```math
 V_{\mathrm{MLP}}
 =
 4\frac{n-1}{n}\Phi
-$$
+```
 
 当 $n$ 较大时近似为 $4\Phi$；当 $n=2$ 时精确值为 $2\Phi$。
 
@@ -754,11 +754,11 @@ Attention 模块也通常有一次 forward All-Reduce 和一次 backward All-Red
 
 假设：
 
-$$
+```math
 TP=4,
 \qquad
 DP=2
-$$
+```
 
 总 GPU 数为 $4\times2=8$：
 
@@ -784,13 +784,13 @@ TP 通信常位于层内关键路径，不完成当前集合通信就无法继�
 
 假设：
 
-$$
+```math
 TP=2,
 \qquad
 PP=2,
 \qquad
 DP=2
-$$
+```
 
 总 GPU 数为 $2\times2\times2=8$。
 
@@ -828,9 +828,9 @@ PP 决定 layer
 
 完整 ZeRO-3 会增加参数聚合和调度复杂度。很多 Megatron 训练会采用：
 
-$$
+```math
 TP+PP+DP+\text{Distributed Optimizer}
-$$
+```
 
 Distributed Optimizer 在 DP 维度切分 FP32 master parameters 和 Adam states，并配合梯度 Reduce-Scatter、参数 All-Gather，取得优化器显存收益，而不一定让低精度计算参数始终保持 ZeRO-3 式分片。
 
@@ -881,9 +881,9 @@ Distributed Optimizer 在 DP 维度切分 FP32 master parameters 和 Adam states
 
 $H_i$ 是完整中间激活的不同特征分片，恢复 $H$ 才需要 All-Gather。但第二层的 $Z_i=H_iB_i$ 已经具有完整输出形状，只是数值上的部分和：
 
-$$
+```math
 Z=\sum_iZ_i
-$$
+```
 
 所以必须 All-Reduce。
 
@@ -895,9 +895,9 @@ $$
 
 “最后一次”只描述 forward。backward 回到列并行输入时还要对 $dX_i$ 做一次 All-Reduce。两次 Ring All-Reduce 的精确单 rank 发送量为：
 
-$$
+```math
 4\frac{n-1}{n}\Phi
-$$
+```
 
 $4\Phi$ 是 $n$ 较大时的近似。
 

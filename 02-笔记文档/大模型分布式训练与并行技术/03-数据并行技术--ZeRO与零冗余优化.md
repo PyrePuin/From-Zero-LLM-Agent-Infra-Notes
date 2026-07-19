@@ -71,7 +71,7 @@ ZeRO-R 主要优化这部分。
 
 因此，完整峰值显存应理解为：
 
-$$
+```math
 M_{\mathrm{peak}}
 =
 M_{\mathrm{model\ states}}
@@ -81,7 +81,7 @@ M_{\mathrm{activations}}
 M_{\mathrm{buffers}}
 +
 M_{\mathrm{fragmentation}}
-$$
+```
 
 ZeRO-1/2/3 降低模型状态冗余，但不代表激活和临时空间会自动消失。
 
@@ -125,22 +125,22 @@ FP16 参数执行 forward / backward
 
 Adam 的核心状态是 $m$ 和 $v$；FP32 master 参数是混合精度更新额外维护的高精度权重。ZeRO 的显存分析通常把三者合称为 optimizer states：
 
-$$
+```math
 M_{\mathrm{optimizer}}
 =
 4P_{W_{32}}
 +4P_m
 +4P_v
 =12P
-$$
+```
 
 所以普通 DDP 的模型状态显存约为：
 
-$$
+```math
 M_{\mathrm{DDP}}
 =2P+2P+12P
 =16P
-$$
+```
 
 > [!warning]
 > 原生 PyTorch `autocast` 通常让模型参数本身保持 FP32，只在算子执行时选择低精度，并不一定长期保存独立的 FP16 参数副本。上面的 $2P+2P+12P$ 是 ZeRO 论文和 DeepSpeed FP16 训练中常用的分析口径，不应机械套用到所有 AMP 实现。
@@ -195,19 +195,19 @@ GPU 3：完整 W16 + 完整 G + 第 3 片 W32/m/v
 
 单卡显存为：
 
-$$
+```math
 M_{\mathrm{ZeRO1}}
 =
 4P+\frac{12P}{N}
-$$
+```
 
 当 $N=4$：
 
-$$
+```math
 M_{\mathrm{ZeRO1}}
 =4P+\frac{12P}{4}
 =7P
-$$
+```
 
 相比 DDP 的 $16P$，只切最大的一类状态就已经获得明显收益。
 
@@ -275,37 +275,37 @@ GPU 3：完整 W16 + G[3] + optimizer states[3]
 
 单卡长期模型状态显存为：
 
-$$
+```math
 M_{\mathrm{ZeRO2}}
 =
 2P+\frac{2P}{N}+\frac{12P}{N}
 =
 2P+\frac{14P}{N}
-$$
+```
 
 ### 5.2 Reduce-Scatter 如何把梯度交给 owner
 
 每个 rank 处理不同数据，因此都会计算完整模型的局部梯度贡献。设梯度 bucket 被切成 $N$ 个 chunk：
 
-$$
+```math
 g_0^{(r)},g_1^{(r)},\ldots,g_{N-1}^{(r)}
-$$
+```
 
 上标 $r$ 表示由 rank $r$ 的数据得到，下标表示参数分片。Reduce-Scatter 的目标是让 rank $j$ 最终得到：
 
-$$
+```math
 G_j
 =
 \sum_{r=0}^{N-1}g_j^{(r)}
-$$
+```
 
 ![每个梯度分片被归约到对应的 optimizer owner](./assets/03-数据并行技术--ZeRO与零冗余优化/08-zero2-reduce-scatter.jpg)
 
 以 4 张 GPU 为例，Ring Reduce-Scatter 需要：
 
-$$
+```math
 N-1=3
-$$
+```
 
 轮通信，而不是 4 轮。每轮接收一个 chunk 或部分和，立即与本地对应 chunk 相加，再在后续轮次继续转发。
 
@@ -372,13 +372,13 @@ GPU 3：W16[3] + G[3] + W32[3]/m[3]/v[3]
 
 理论长期模型状态显存为：
 
-$$
+```math
 M_{\mathrm{ZeRO3}}
 =
 \frac{2P+2P+12P}{N}
 =
 \frac{16P}{N}
-$$
+```
 
 ### 6.2 没有完整参数，如何 forward 和 backward
 
@@ -402,14 +402,14 @@ Backward 到该层前：再次 All-Gather 当前层参数
 
 $16P/N$ 是长期模型状态。计算某层时还需要：
 
-$$
+```math
 M_{\mathrm{peak}}
 \approx
 \frac{16P}{N}
 +M_{\mathrm{largest\ gathered\ layer}}
 +M_{\mathrm{activation}}
 +M_{\mathrm{buffers}}
-$$
+```
 
 ZeRO-3 不会在每张卡上一次性重建整个模型的全部状态，最大的 $12P$ optimizer states 始终保持分片；临时重建的主要是当前层或当前 bucket 的低精度参数。
 
@@ -432,23 +432,23 @@ ZeRO-3：不同数据分片 + 计算时完整层参数 + 状态分片存储
 
 设 $\Phi$ 是完整低精度参数或梯度的字节数，$N$ 是数据并行规模。Ring 集合通信的精确单卡发送量为：
 
-$$
+```math
 V_{\mathrm{RS}}
 =
 \frac{N-1}{N}\Phi
-$$
+```
 
-$$
+```math
 V_{\mathrm{AG}}
 =
 \frac{N-1}{N}\Phi
-$$
+```
 
-$$
+```math
 V_{\mathrm{AR}}
 =
 2\frac{N-1}{N}\Phi
-$$
+```
 
 在 $N$ 较大时，可近似记作 $\Phi$、$\Phi$ 和 $2\Phi$。
 
@@ -652,9 +652,9 @@ GPU 显存下降
 
 不是。常见 FP16 + Adam 口径中，被分片的是：
 
-$$
+```math
 4P_{W_{32}}+4P_m+4P_v=12P
-$$
+```
 
 FP32 master 参数、Adam 一阶动量和二阶动量共同构成 optimizer 相关状态。ZeRO-1 仍完整保存 $2P$ 的 FP16 参数和 $2P$ 的梯度，所以单卡为 $4P+12P/N$。
 
@@ -680,9 +680,9 @@ optimizer.state[W32]：step、exp_avg、exp_avg_sq
 
 “负责 $G_0$”表示负责最终保存和更新第 0 个参数分片，不表示只计算第 0 个梯度。GPU 0 使用完整模型处理自己的数据，必须先计算：
 
-$$
+```math
 g_0^{(0)},g_1^{(0)},\ldots,g_{N-1}^{(0)}
-$$
+```
 
 在 4-GPU Ring Reduce-Scatter 中只需 3 轮。未被注入归约流程的本地 chunk 必须继续保留；某个 chunk 已经发送或累加进部分和后，对应 buffer 才能释放或复用。因此 GPU 0 会暂存当前完整 bucket，但不一定暂存完整模型的全部梯度。
 

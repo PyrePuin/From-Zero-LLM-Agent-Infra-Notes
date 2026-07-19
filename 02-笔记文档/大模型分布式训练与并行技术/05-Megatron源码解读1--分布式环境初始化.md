@@ -32,7 +32,7 @@ tags:
 
 核心示例固定为：
 
-$$
+```math
 \text{world size}=16,
 \qquad
 TP=2,
@@ -40,7 +40,7 @@ TP=2,
 PP=4,
 \qquad
 DP=2
-$$
+```
 
 这样每一段循环都能展开成具体 rank，而不是停留在抽象公式上。
 
@@ -367,9 +367,9 @@ torch.distributed.get_rank(
 
 先定义三个坐标：
 
-$$
+```math
 (p,d,t)
-$$
+```
 
 其中：
 
@@ -379,9 +379,9 @@ $$
 
 本例采用的 rank 排列方式为：
 
-$$
+```math
 \text{rank}=p(DT)+dT+t
-$$
+```
 
 也就是说：
 
@@ -432,16 +432,16 @@ initialize_model_parallel(
 
 为什么没有显式传入 DP size？因为：
 
-$$
+```math
 \text{world size}
 =TP\times PP\times DP
-$$
+```
 
 所以：
 
-$$
+```math
 DP=\frac{\text{world size}}{TP\times PP}
-$$
+```
 
 代码首先检查能否整除：
 
@@ -463,9 +463,9 @@ data_parallel_size = world_size // (
 
 代入本例：
 
-$$
+```math
 DP=\frac{16}{2\times4}=2
-$$
+```
 
 ### 5.1 计算 TP 组数
 
@@ -475,9 +475,9 @@ num_tensor_model_parallel_groups = (
 )
 ```
 
-$$
+```math
 \text{TP组数}=\frac{16}{2}=8
-$$
+```
 
 ### 5.2 计算 PP 组数
 
@@ -487,17 +487,17 @@ num_pipeline_model_parallel_groups = (
 )
 ```
 
-$$
+```math
 \text{PP组数}=\frac{16}{4}=4
-$$
+```
 
 这里的变量表示“PP 组的数量”，不是“PP stages 的数量”。
 
 由于：
 
-$$
+```math
 \text{PP组数}=DP\times TP=2\times2=4
-$$
+```
 
 它也恰好等于一个 PP stage 内的进程数量，后面会被用作跨 stage 的 rank 步长。
 
@@ -509,9 +509,9 @@ num_data_parallel_groups = (
 )
 ```
 
-$$
+```math
 \text{DP组数}=\frac{16}{2}=8
-$$
+```
 
 最终得到：
 
@@ -714,9 +714,9 @@ MP 不是新的第四种模型切分算法。它表示：
 
 因此：
 
-$$
+```math
 MP_{\text{size}}=TP_{\text{size}}\times PP_{\text{size}}
-$$
+```
 
 本例中每个 MP group 有 8 张 GPU，共有 2 个模型副本。
 
@@ -816,9 +816,9 @@ i=3 → range(3,16,4) → [g3,g7,g11,g15]
 
 为什么步长为 4？因为一个 PP stage 内共有：
 
-$$
+```math
 DP\times TP=2\times2=4
-$$
+```
 
 个 rank。
 
@@ -873,11 +873,11 @@ if rank in embedding_ranks:
 
 GPT 模型经常使用权重绑定：
 
-$$
+```math
 W_{\text{input embedding}}
 =
 W_{\text{output vocabulary projection}}
-$$
+```
 
 但在 PP 中：
 
@@ -1159,9 +1159,9 @@ PP group count = 4
 
 MP 表示由 TP 与 PP ranks 共同组成的一套完整模型副本：
 
-$$
+```math
 MP=TP\times PP
-$$
+```
 
 它不是独立的第四种模型切分算法，也通常没有一种每层固定执行的“MP collective”。实际计算通信仍由 TP group 和 PP group 完成。
 
@@ -1212,9 +1212,9 @@ DP副本1的TP组：[g2,g3]
 
 因为 DP group 必须固定 $(p,t)$，只改变 $d$：
 
-$$
+```math
 DP\text{组}:固定(p,t)，改变d
-$$
+```
 
 外层 `i` 固定 PP stage，内层 `j` 固定 TP shard，`range(..., step=TP)` 才能遍历不同 DP replicas。
 
@@ -1222,9 +1222,9 @@ $$
 
 因为 rank 布局中一个 PP stage 占据 $DP\times TP$ 个连续 ranks，而：
 
-$$
+```math
 \text{num pipeline groups}=DP\times TP
-$$
+```
 
 保持 $(d,t)$ 不变、移动到下一个 $p$，global rank 就要增加这个步长。
 
