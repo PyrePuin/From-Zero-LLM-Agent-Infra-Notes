@@ -276,18 +276,18 @@ Pipeline parallelism 与 activation checkpointing 是两个可以组合的维度
 1. 所有 micro-batch 的 stage 入口 checkpoint。
 2. 当前一个 micro-batch 在 backward 重计算时产生的 stage 内部激活。
 
-设 mini-batch 包含 $N$ 个样本，被切为 $M$ 个 micro-batch；stage 边界激活宽度为 $d_b$，stage 内部每层激活的简化宽度为 $d$。两部分分别为：
+设 mini-batch 包含 $N$ 个样本，被切为 $M$ 个 micro-batch；stage 边界激活宽度为 $d_b$，stage 内部每层激活的简化宽度为 $d$。
+
+所有 micro-batch 的入口 checkpoint 总量为：
 
 ```math
-\begin{aligned}
-\text{入口 checkpoint}
-&=
-M\times\frac{N}{M}\times d_b
-=Nd_b,\\
-\text{当前 micro-batch 内部激活}
-&\approx
-\frac{N}{M}\times\frac{L}{K}\times d.
-\end{aligned}
+M\times\frac{N}{M}\times d_b=Nd_b
+```
+
+当前一个 micro-batch 在重计算阶段产生的内部激活约为：
+
+```math
+\frac{N}{M}\times\frac{L}{K}\times d
 ```
 
 因此：

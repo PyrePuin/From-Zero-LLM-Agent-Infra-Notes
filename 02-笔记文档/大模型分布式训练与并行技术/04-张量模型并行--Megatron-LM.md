@@ -196,12 +196,7 @@ backward 的 dX 是不同贡献，求和关系
 
 ```math
 W=
-\begin{bmatrix}
-W_0\\
-W_1\\
-\vdots\\
-W_{n-1}
-\end{bmatrix}
+\left[W_0^{\mathsf T},W_1^{\mathsf T},\ldots,W_{n-1}^{\mathsf T}\right]^{\mathsf T}
 ```
 
 其中：
@@ -328,12 +323,7 @@ GELU 是逐元素函数，各 rank 可以直接对本地分片执行，无需恢
 
 ```math
 B=
-\begin{bmatrix}
-B_0\\
-B_1\\
-\vdots\\
-B_{n-1}
-\end{bmatrix},
+\left[B_0^{\mathsf T},B_1^{\mathsf T},\ldots,B_{n-1}^{\mathsf T}\right]^{\mathsf T},
 \qquad
 B_i\in\mathbb{R}^{h'/n\times h}
 ```
@@ -450,12 +440,7 @@ O_0,O_1,\ldots,O_{n-1}
 
 ```math
 W^O=
-\begin{bmatrix}
-W_0^O\\
-W_1^O\\
-\vdots\\
-W_{n-1}^O
-\end{bmatrix}
+\left[(W_0^O)^{\mathsf T},(W_1^O)^{\mathsf T},\ldots,(W_{n-1}^O)^{\mathsf T}\right]^{\mathsf T}
 ```
 
 每个 rank 计算：
@@ -619,14 +604,16 @@ q=\sum_iq_i
 
 ### 8.4 正确类别 logit
 
-每个 rank 判断标签 $y$ 是否属于自己的词表范围：
+每个 rank 判断标签 $y$ 是否属于自己的词表范围。如果 $y\in\mathcal{V}_i$，则：
 
 ```math
-t_i=
-\begin{cases}
-o_y,&y\in\mathcal{V}_i\\
-0,&y\notin\mathcal{V}_i
-\end{cases}
+t_i=o_y
+```
+
+如果 $y\notin\mathcal{V}_i$，则：
+
+```math
+t_i=0
 ```
 
 执行 All-Reduce SUM：
