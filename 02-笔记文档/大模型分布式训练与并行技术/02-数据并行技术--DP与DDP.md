@@ -20,7 +20,7 @@ tags: [LLM, distributed-training, data-parallelism, DDP, parameter-server, ring-
 
 ## 一句话主线
 
-假设有 $N$ 张 GPU，数据并行的一次同步训练可以概括为：
+假设有 $`N`$ 张 GPU，数据并行的一次同步训练可以概括为：
 
 ```text
 复制完整模型
@@ -39,11 +39,11 @@ tags: [LLM, distributed-training, data-parallelism, DDP, parameter-server, ring-
 
 ### 1.1 模型复制，数据切分
 
-设模型参数为 $W$，global batch 为 $X$。在 $N$ 张 GPU 上训练时：
+设模型参数为 $`W`$，global batch 为 $`X`$。在 $`N`$ 张 GPU 上训练时：
 
-- 每张 GPU 都保存完整的 $W$。
-- $X$ 沿 batch 维切成 $X_0,X_1,\ldots,X_{N-1}$。
-- 第 $i$ 张 GPU 使用 $X_i$ 独立完成 forward 和 backward，得到局部梯度 $g_i$。
+- 每张 GPU 都保存完整的 $`W`$。
+- $`X`$ 沿 batch 维切成 $`X_0,X_1,\ldots,X_{N-1}`$。
+- 第 $`i`$ 张 GPU 使用 $`X_i`$ 独立完成 forward 和 backward，得到局部梯度 $`g_i`$。
 
 当各数据分片大小相等，且每个局部 loss 都按样本取平均时，全局平均梯度为：
 
@@ -124,23 +124,23 @@ W\leftarrow W-\eta g
 
 ### 3.2 梯度陈旧性
 
-异步 Worker 计算梯度时使用的可能不是 Server 当前参数。设 Server 已更新到 $W_t$，某个 Worker 提交的梯度却是在旧参数 $W_{t-\tau}$ 上计算的：
+异步 Worker 计算梯度时使用的可能不是 Server 当前参数。设 Server 已更新到 $`W_t`$，某个 Worker 提交的梯度却是在旧参数 $`W_{t-\tau}`$ 上计算的：
 
 ```math
 g\left(W_{t-\tau}\right)
 ```
 
-$\tau$ 称为 staleness（陈旧度或延迟步数）。常见策略包括：
+$`\tau`$ 称为 staleness（陈旧度或延迟步数）。常见策略包括：
 
-- **同步**：$\tau=0$，每轮都等待。
-- **完全异步**：不限制 $\tau$，吞吐高但梯度可能非常陈旧。
+- **同步**：$`\tau=0`$，每轮都等待。
+- **完全异步**：不限制 $`\tau`$，吞吐高但梯度可能非常陈旧。
 - **有界异步**：规定最大陈旧度，兼顾吞吐和优化稳定性。
 
 ![同步、完全异步和有界异步](./assets/02-数据并行技术--DP与DDP/04-staleness-modes.jpg)
 
 ### 3.3 异步不等于扩大 batch
 
-扩大同步 batch 是在同一个参数点 $W_t$ 上计算更多样本的梯度，再统一更新；异步训练则可能把在不同历史参数点上计算的梯度陆续应用到当前参数。两者的优化过程不同。
+扩大同步 batch 是在同一个参数点 $`W_t`$ 上计算更多样本的梯度，再统一更新；异步训练则可能把在不同历史参数点上计算的梯度陆续应用到当前参数。两者的优化过程不同。
 
 需要区分两种速度：
 
@@ -193,7 +193,7 @@ DDP 的关键不是“多机”三个字，而是多个独立进程维护模型�
 
 ### 5.1 目标：每个 rank 都得到完整聚合梯度
 
-设有 $N=4$ 个 rank，每个 rank 的局部梯度张量被逻辑切成四块：
+设有 $`N=4`$ 个 rank，每个 rank 的局部梯度张量被逻辑切成四块：
 
 ```text
 Rank 0：a₀ b₀ c₀ d₀
@@ -218,7 +218,7 @@ d₀+d₁+d₂+d₃
 
 ### 5.2 环形拓扑
 
-把 $N$ 个 rank 排成逻辑环，每个 rank 只向下一个邻居发送，并从上一个邻居接收：
+把 $`N`$ 个 rank 排成逻辑环，每个 rank 只向下一个邻居发送，并从上一个邻居接收：
 
 ![四个 rank 构成逻辑通信环](./assets/02-数据并行技术--DP与DDP/06-reduce-scatter-ring.jpg)
 
@@ -229,7 +229,7 @@ d₀+d₁+d₂+d₃
 
 ### 5.3 Reduce-Scatter
 
-每个通信 round 中，每个 rank 发送一个 chunk，同时接收并累加另一个 chunk。经过 $N-1$ 个 round，每个 chunk 都正好遍历需要参与求和的 rank。
+每个通信 round 中，每个 rank 发送一个 chunk，同时接收并累加另一个 chunk。经过 $`N-1`$ 个 round，每个 chunk 都正好遍历需要参与求和的 rank。
 
 ![Reduce-Scatter 第 1 轮](./assets/02-数据并行技术--DP与DDP/07-reduce-scatter-round1.jpg)
 
@@ -247,7 +247,7 @@ All-Gather 继续沿环传递已经完成求和的 chunk，此阶段只复制，
 
 ![All-Gather 的起始状态](./assets/02-数据并行技术--DP与DDP/10-allgather-start.jpg)
 
-同样经过 $N-1$ 个 round 后，每个 rank 都收集到所有已归约 chunk：
+同样经过 $`N-1`$ 个 round 后，每个 rank 都收集到所有已归约 chunk：
 
 ![All-Gather 中各归约分片沿环传播](./assets/02-数据并行技术--DP与DDP/11-allgather-rounds.jpg)
 
@@ -261,18 +261,18 @@ All-Gather 继续沿环传递已经完成求和的 chunk，此阶段只复制，
 
 设：
 
-- $\Phi$：完整梯度张量或所有 gradient bucket 的总字节数。
-- $N$：参与 AllReduce 的 rank 数。
-- 每个 chunk 的大小为 $\Phi/N$。
+- $`\Phi`$：完整梯度张量或所有 gradient bucket 的总字节数。
+- $`N`$：参与 AllReduce 的 rank 数。
+- 每个 chunk 的大小为 $`\Phi/N`$。
 
-Reduce-Scatter 有 $N-1$ 个 round，每个 round 每张卡发送一个 chunk：
+Reduce-Scatter 有 $`N-1`$ 个 round，每个 round 每张卡发送一个 chunk：
 
 ```math
 V_{\mathrm{RS,send}}
 =(N-1)\frac{\Phi}{N}
 ```
 
-All-Gather 同样有 $N-1$ 个 round：
+All-Gather 同样有 $`N-1`$ 个 round：
 
 ```math
 V_{\mathrm{AG,send}}
@@ -286,7 +286,7 @@ V_{\mathrm{send}}
 =2(N-1)\frac{\Phi}{N}
 ```
 
-当 $N$ 很大时，它趋近于 $2\Phi$。
+当 $`N`$ 很大时，它趋近于 $`2\Phi`$。
 
 ### 6.2 发送量、接收量和全局流量
 
@@ -312,11 +312,11 @@ V_{\mathrm{global,send}}
 =2(N-1)\Phi
 ```
 
-它在大 $N$ 下才可以近似写成 $2N\Phi$。讨论“通信量”时必须先声明口径，否则同一过程可能相差一倍甚至更多。
+它在大 $`N`$ 下才可以近似写成 $`2N\Phi`$。讨论“通信量”时必须先声明口径，否则同一过程可能相差一倍甚至更多。
 
 ### 6.3 四卡数值例子
 
-设 $N=4$，完整梯度大小为 $\Phi=400\ \mathrm{MB}$，则每个 chunk 为 $100\ \mathrm{MB}$。
+设 $`N=4`$，完整梯度大小为 $`\Phi=400\ \mathrm{MB}`$，则每个 chunk 为 $`100\ \mathrm{MB}`$。
 
 ```text
 Reduce-Scatter：3 轮 × 100 MB = 300 MB
@@ -330,18 +330,18 @@ All-Gather：    3 轮 × 100 MB = 300 MB
 =600\ \mathrm{MB}
 ```
 
-同一张卡还会接收 $600\ \mathrm{MB}$；若统计收发总量，则为 $1200\ \mathrm{MB}$。
+同一张卡还会接收 $`600\ \mathrm{MB}`$；若统计收发总量，则为 $`1200\ \mathrm{MB}`$。
 
 ---
 
 ## 7. 集中式通信与 Ring-AllReduce 的比较
 
-假设 Worker 数为 $N$，梯度大小为 $\Phi$。在最简单的单 Server 模型中，每个 Worker 向 Server 发送一份梯度，再接收一份聚合结果：
+假设 Worker 数为 $`N`$，梯度大小为 $`\Phi`$。在最简单的单 Server 模型中，每个 Worker 向 Server 发送一份梯度，再接收一份聚合结果：
 
 | 架构 | 全局发送量 | 压力分布 |
 | --- | ---: | --- |
-| 单 Server | 约 $2N\Phi$ | Server 集中接收 $N\Phi$、发送 $N\Phi$ |
-| Ring-AllReduce | 精确为 $2(N-1)\Phi$ | 均匀分散到所有 rank |
+| 单 Server | 约 $`2N\Phi`$ | Server 集中接收 $`N\Phi`$、发送 $`N\Phi`$ |
+| Ring-AllReduce | 精确为 $`2(N-1)\Phi`$ | 均匀分散到所有 rank |
 
 两者的数据量是同一数量级，Ring-AllReduce 的关键优势是没有中心通信热点，所有 rank 可以同时利用链路。
 
@@ -376,7 +376,7 @@ ZeRO 不是简单把模型按算子切开的张量并行。它仍然保持数据
 | 异步参数服务器 | Worker 不必等待聚合完成 | 梯度陈旧、收敛行为改变 |
 | 有界异步 | 控制最大陈旧度 | 仍需管理延迟和调度 |
 | DDP | 多进程同步数据并行 | 每张卡仍保存完整模型状态 |
-| Ring-AllReduce | 均衡大张量 AllReduce 的带宽压力 | 需要 $2(N-1)$ 个通信 round，延迟敏感 |
+| Ring-AllReduce | 均衡大张量 AllReduce 的带宽压力 | 需要 $`2(N-1)`$ 个通信 round，延迟敏感 |
 | Gradient bucket | 合并小梯度并重叠通信与 backward | bucket 划分影响峰值显存与 overlap |
 
 ---
@@ -399,17 +399,17 @@ ZeRO 不是简单把模型按算子切开的张量并行。它仍然保持数据
 
 在 DDP 语境下，被切分的是待同步的梯度张量或 gradient bucket，不是训练样本。训练样本在 forward 之前已经按 rank 分片。
 
-### Q5：$2(N-1)\Phi/N$ 只是一个通信 round 吗？
+### Q5：$`2(N-1)\Phi/N`$ 只是一个通信 round 吗？
 
-不是。它已经累加了 Reduce-Scatter 的 $N-1$ 轮和 All-Gather 的 $N-1$ 轮，是单卡完成一次完整 Ring-AllReduce 的总发送量。
+不是。它已经累加了 Reduce-Scatter 的 $`N-1`$ 轮和 All-Gather 的 $`N-1`$ 轮，是单卡完成一次完整 Ring-AllReduce 的总发送量。
 
-在标准同步 DDP 中，如果每次 `optimizer.step()` 前同步一次全部梯度，它通常也就是一次参数更新对应的单卡梯度发送量。工程实现虽然会把梯度拆成多个 bucket 分别执行 AllReduce，但所有 bucket 的大小之和仍约为 $\Phi$。
+在标准同步 DDP 中，如果每次 `optimizer.step()` 前同步一次全部梯度，它通常也就是一次参数更新对应的单卡梯度发送量。工程实现虽然会把梯度拆成多个 bucket 分别执行 AllReduce，但所有 bucket 的大小之和仍约为 $`\Phi`$。
 
 如果使用梯度累积，并在前几个 micro-batch 上关闭同步、只在最后一次 backward 时同步，那么每次参数更新的通信量基本不变，但摊到每个 micro-batch 的通信量会下降。
 
 ### Q6：为什么有时看到的 Ring-AllReduce 通信量会再乘 2？
 
-因为统计口径不同。$2(N-1)\Phi/N$ 只统计单卡发送量；单卡接收量与它相同。如果把发送和接收都算作网卡处理流量，就会得到 $4(N-1)\Phi/N$。
+因为统计口径不同。$`2(N-1)\Phi/N`$ 只统计单卡发送量；单卡接收量与它相同。如果把发送和接收都算作网卡处理流量，就会得到 $`4(N-1)\Phi/N`$。
 
 ### Q7：DDP 每一步都要广播新参数吗？
 
@@ -419,16 +419,16 @@ ZeRO 不是简单把模型按算子切开的张量并行。它仍然保持数据
 
 这里的“DP”特指梯度集中到主卡或 Parameter Server、再把聚合结果发回各 Worker 的集中式实现；严格来说，DDP 本身也是数据并行的一种实现。
 
-设有 $N$ 张 GPU，完整梯度大小为 $\Phi$，暂时只统计梯度聚合及结果分发：
+设有 $`N`$ 张 GPU，完整梯度大小为 $`\Phi`$，暂时只统计梯度聚合及结果分发：
 
 | 实现 | 全局总发送量 | 单节点最大收发总量 |
 | --- | ---: | ---: |
-| 集中式 DP | 约 $2(N-1)\Phi$ | 中心节点约 $2(N-1)\Phi$ |
-| Ring-AllReduce DDP | $2(N-1)\Phi$ | 每个 rank 为 $4(N-1)\Phi/N$ |
+| 集中式 DP | 约 $`2(N-1)\Phi`$ | 中心节点约 $`2(N-1)\Phi`$ |
+| Ring-AllReduce DDP | $`2(N-1)\Phi`$ | 每个 rank 为 $`4(N-1)\Phi/N`$ |
 
 两者在全系统中传输的总字节数几乎相同。区别在于，集中式 DP 的流量都要经过中心节点；DDP 则把流量均匀分散到所有 rank，使多条链路可以同时工作。因此，**总通信量相近，不代表通信时间相近**。
 
-若每条有效链路带宽为 $B$，忽略计算、协议开销和拓扑差异，在带宽占主导的理想情况下：
+若每条有效链路带宽为 $`B`$，忽略计算、协议开销和拓扑差异，在带宽占主导的理想情况下：
 
 ```math
 T_{\mathrm{central}}
@@ -444,7 +444,7 @@ T_{\mathrm{ring}}
 \frac{2(N-1)\Phi}{NB}
 ```
 
-Ring 还需要经历 $2(N-1)$ 个通信 round，所以更完整的性能模型还要加入每轮启动延迟 $\alpha$：
+Ring 还需要经历 $`2(N-1)`$ 个通信 round，所以更完整的性能模型还要加入每轮启动延迟 $`\alpha`$：
 
 ```math
 T_{\mathrm{ring}}

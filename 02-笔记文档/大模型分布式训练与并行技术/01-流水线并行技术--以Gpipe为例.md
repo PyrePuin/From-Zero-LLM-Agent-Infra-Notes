@@ -80,10 +80,10 @@ GPU1：Layer 3 → Layer 4
 
 设：
 
-- $K$：流水线 stage 数，简化时也等同于 GPU 数。
-- $t_f$：一个 stage 的 forward 时间。
-- $t_b$：一个 stage 的 backward 时间。
-- $t_{fb}=t_f+t_b$。
+- $`K`$：流水线 stage 数，简化时也等同于 GPU 数。
+- $`t_f`$：一个 stage 的 forward 时间。
+- $`t_b`$：一个 stage 的 backward 时间。
+- $`t_{fb}=t_f+t_b`$。
 
 朴素调度中， bubble 占比为：
 
@@ -91,7 +91,7 @@ GPU1：Layer 3 → Layer 4
 \frac{K-1}{K}
 ```
 
-当 $K$ 增大时，这个比例趋近于 1。直观上，stage 越多，单个 batch 串行穿过整条流水线时，等待的设备就越多。
+当 $`K`$ 增大时，这个比例趋近于 1。直观上，stage 越多，单个 batch 串行穿过整条流水线时，等待的设备就越多。
 
 ### 2.3 中间激活为什么占显存
 
@@ -111,16 +111,16 @@ z=Wx,
 \frac{\partial \mathcal L}{\partial z}x^T
 ```
 
-计算 $W$ 的梯度仍然需要 forward 时的输入 $x$。ReLU、Attention、MLP、LayerNorm 等算子的 backward 也需要各自的输入、输出、mask 或统计量。因此 forward 中产生的激活不能立刻全部释放。
+计算 $`W`$ 的梯度仍然需要 forward 时的输入 $`x`$。ReLU、Attention、MLP、LayerNorm 等算子的 backward 也需要各自的输入、输出、mask 或统计量。因此 forward 中产生的激活不能立刻全部释放。
 
 ![backward 需要各层 forward 的中间激活 z](./assets/01-流水线并行技术--以Gpipe为例/04-intermediate-activations.jpg)
 
 假设：
 
-- mini-batch 大小为 $N$。
-- 模型有 $L$ 层。
-- 每层激活宽度为 $d$。
-- 模型均匀分到 $K$ 张卡，每卡有 $L/K$ 层。
+- mini-batch 大小为 $`N`$。
+- 模型有 $`L`$ 层。
+- 每层激活宽度为 $`d`$。
+- 模型均匀分到 $`K`$ 张卡，每卡有 $`L/K`$ 层。
 
 忽略常数和具体算子的额外张量，每张卡的内部激活量可粗略写成：
 
@@ -128,7 +128,7 @@ z=Wx,
 O\left(N\times\frac{L}{K}\times d\right)
 ```
 
-对于 Transformer，如果 $N$ 只是 batch size，还应显式计入序列长度 $S$：
+对于 Transformer，如果 $`N`$ 只是 batch size，还应显式计入序列长度 $`S`$：
 
 ```math
 O\left(N S\times\frac{L}{K}\times d\right)
@@ -142,7 +142,7 @@ O\left(N S\times\frac{L}{K}\times d\right)
 
 ### 3.1 mini-batch 与 micro-batch
 
-设一次参数更新对应的 mini-batch 大小为 $N$，把它切成 $M$ 份，则每个 micro-batch 大小为：
+设一次参数更新对应的 mini-batch 大小为 $`N`$，把它切成 $`M`$ 份，则每个 micro-batch 大小为：
 
 ```math
 \frac{N}{M}
@@ -173,22 +173,22 @@ flowchart LR
 
 | 时间 | GPU0 | GPU1 | GPU2 | GPU3 |
 | --- | --- | --- | --- | --- |
-| $T_1$ | MB0 | 空闲 | 空闲 | 空闲 |
-| $T_2$ | MB1 | MB0 | 空闲 | 空闲 |
-| $T_3$ | MB2 | MB1 | MB0 | 空闲 |
-| $T_4$ | MB3 | MB2 | MB1 | MB0 |
+| $`T_1`$ | MB0 | 空闲 | 空闲 | 空闲 |
+| $`T_2`$ | MB1 | MB0 | 空闲 | 空闲 |
+| $`T_3`$ | MB2 | MB1 | MB0 | 空闲 |
+| $`T_4`$ | MB3 | MB2 | MB1 | MB0 |
 
-在 $T_4$，四张 GPU 同时工作，但处理的是不同 micro-batch 的不同模型层。
+在 $`T_4`$，四张 GPU 同时工作，但处理的是不同 micro-batch 的不同模型层。
 
 ![GPipe 中多个 micro-batch 的流水线调度](./assets/01-流水线并行技术--以Gpipe为例/05-micro-batch-pipeline.jpg)
 
-切分成 $M$ 个 micro-batch 后，在各 stage 计算时间相近、暂不考虑通信开销的简化模型中，bubble 占比为：
+切分成 $`M`$ 个 micro-batch 后，在各 stage 计算时间相近、暂不考虑通信开销的简化模型中，bubble 占比为：
 
 ```math
 O\left(\frac{K-1}{K+M-1}\right)
 ```
 
-当 $M$ 增大时，启动和排空阶段的 bubble 会被更多有效计算摊薄。GPipe 的实验观察到，当 $M\ge 4K$ 时，bubble 开销已经接近可以忽略；这是特定实验条件下的经验结论，不是对所有模型和硬件都成立的保证，实际配置仍要结合算子效率和通信开销调优。
+当 $`M`$ 增大时，启动和排空阶段的 bubble 会被更多有效计算摊薄。GPipe 的实验观察到，当 $`M\ge 4K`$ 时，bubble 开销已经接近可以忽略；这是特定实验条件下的经验结论，不是对所有模型和硬件都成立的保证，实际配置仍要结合算子效率和通信开销调优。
 
 > [!warning]
 > micro-batch 不是越小越好。切得过小可能降低矩阵乘法效率、增加调度和通信开销。工程上需要在 bubble、算子效率、显存和通信之间取平衡。
@@ -224,12 +224,12 @@ O\left(\frac{K-1}{K+M-1}\right)
 z₀ → Layer 1 → z₁ → Layer 2 → z₂ → Layer 3 → z₃
 ```
 
-不使用 checkpoint 时，原始 forward 后需要让 $z_1,z_2$ 一直存活，直到对应 Layer 完成 backward。
+不使用 checkpoint 时，原始 forward 后需要让 $`z_1,z_2`$ 一直存活，直到对应 Layer 完成 backward。
 
-使用 checkpoint 时，可以长期保存 stage 入口 $z_0$；轮到这个 micro-batch backward 时：
+使用 checkpoint 时，可以长期保存 stage 入口 $`z_0`$；轮到这个 micro-batch backward 时：
 
-1. 从 $z_0$ 重新执行 Layer 1～3。
-2. 临时重新生成并保存 $z_1,z_2$。
+1. 从 $`z_0`$ 重新执行 Layer 1～3。
+2. 临时重新生成并保存 $`z_1,z_2`$。
 3. 立即执行 Layer 3、2、1 的 backward。
 4. 中间激活使用完后释放。
 
@@ -260,7 +260,7 @@ Pipeline parallelism 与 activation checkpointing 是两个可以组合的维度
 → 立即完成整个 segment 的 backward
 ```
 
-因此，一个 checkpointed segment 的 forward 通常只是额外执行一次，计算量仍随层数线性增长。若粗略设 forward 成本为 $F$、backward 成本为 $2F$：
+因此，一个 checkpointed segment 的 forward 通常只是额外执行一次，计算量仍随层数线性增长。若粗略设 forward 成本为 $`F`$、backward 成本为 $`2F`$：
 
 ```text
 普通训练：      F + 2F = 3F
@@ -276,7 +276,7 @@ Pipeline parallelism 与 activation checkpointing 是两个可以组合的维度
 1. 所有 micro-batch 的 stage 入口 checkpoint。
 2. 当前一个 micro-batch 在 backward 重计算时产生的 stage 内部激活。
 
-设 mini-batch 包含 $N$ 个样本，被切为 $M$ 个 micro-batch；stage 边界激活宽度为 $d_b$，stage 内部每层激活的简化宽度为 $d$。
+设 mini-batch 包含 $`N`$ 个样本，被切为 $`M`$ 个 micro-batch；stage 边界激活宽度为 $`d_b`$，stage 内部每层激活的简化宽度为 $`d`$。
 
 所有 micro-batch 的入口 checkpoint 总量为：
 
@@ -299,7 +299,7 @@ Nd_b+
 \right)
 ```
 
-如果近似认为 $d_b=d$，可以写成：
+如果近似认为 $`d_b=d`$，可以写成：
 
 ```math
 O\left[
@@ -307,7 +307,7 @@ Nd\left(1+\frac{L}{MK}\right)
 \right]
 ```
 
-对于 batch size 为 $N$、序列长度为 $S$ 的 Transformer，更接近：
+对于 batch size 为 $`N`$、序列长度为 $`S`$ 的 Transformer，更接近：
 
 ```math
 O\left(
@@ -319,7 +319,7 @@ NSd_b+
 若换算为字节，还要乘以每个元素的字节数，并考虑 Attention、MLP、LayerNorm 等算子的额外保存量。
 
 > [!warning]
-> 如果 $N$ 表示样本数量，入口 checkpoint 不能只写成 $N$，因为它还包含特征维度；应写成 $Nd_b$。只有把 $N$ 直接定义为“整个 mini-batch 的入口激活元素总数”时，才可以省略 $d_b$。
+> 如果 $`N`$ 表示样本数量，入口 checkpoint 不能只写成 $`N`$，因为它还包含特征维度；应写成 $`Nd_b`$。只有把 $`N`$ 直接定义为“整个 mini-batch 的入口激活元素总数”时，才可以省略 $`d_b`$。
 
 ---
 
@@ -343,16 +343,16 @@ GPipe 的处理方式是：训练时使用各 micro-batch 的充分统计量完�
 
 ### 6.2 GPU 数量与训练速度
 
-关闭高速互联、固定 $M=32$ 时，增加 GPU 仍能获得加速，但通常达不到严格线性：
+关闭高速互联、固定 $`M=32`$ 时，增加 GPU 仍能获得加速，但通常达不到严格线性：
 
 ![关闭 NVLink 后的相对加速结果](./assets/01-流水线并行技术--以Gpipe为例/09-no-nvlink-speed.jpg)
 
-打开高速互联并比较不同 $M$ 时：
+打开高速互联并比较不同 $`M`$ 时：
 
 ![不同 micro-batch 数量下的相对加速结果](./assets/01-流水线并行技术--以Gpipe为例/10-microbatch-speed.jpg)
 
-- $M=1$ 时，流水线接近朴素模型并行，bubble 很大。
-- 增加 $M$ 后，GPU 利用率明显改善。
+- $`M=1`$ 时，流水线接近朴素模型并行，bubble 很大。
+- 增加 $`M`$ 后，GPU 利用率明显改善。
 - 结构更均匀的 Transformer 比 AmoebaNet 获得了更好的扩展效率。
 
 ### 6.3 单 GPU 时间分布
@@ -395,7 +395,7 @@ GPipe 的处理方式是：训练时使用各 micro-batch 的充分统计量完�
 x → Layer 1 → z₁ → Layer 2 → z₂ → Layer 3 → z₃
 ```
 
-计算 Layer 2 的参数梯度时，通常还需要 Layer 2 forward 时的输入 $z_1$。所以 $z_1,z_2$ 不能在原始 forward 后立即全部释放。Transformer 中实际需要保存的不只一个 $z$，还可能包括 Q/K/V、Attention 相关中间量、MLP 激活、mask 和归一化统计量。
+计算 Layer 2 的参数梯度时，通常还需要 Layer 2 forward 时的输入 $`z_1`$。所以 $`z_1,z_2`$ 不能在原始 forward 后立即全部释放。Transformer 中实际需要保存的不只一个 $`z`$，还可能包括 Q/K/V、Attention 相关中间量、MLP 激活、mask 和归一化统计量。
 
 ### Q2：micro-batch 和 activation checkpointing 是一回事吗？
 
@@ -416,7 +416,7 @@ x → Layer 1 → z₁ → Layer 2 → z₂ → Layer 3 → z₃
 
 通常不需要。分配给 GPU 的是模型 stage；每个 micro-batch 会依次流过所有 stage。框架负责 micro-batch 的切分、发送、接收、梯度累积和调度。用户主要决定 micro-batch size、pipeline size 和 Layer 如何切分。
 
-### Q5：backward 重计算时，不还是要存 $z_1,z_2$ 吗？会不会指数增长？
+### Q5：backward 重计算时，不还是要存 $`z_1,z_2`$ 吗？会不会指数增长？
 
 会临时保存，但只为当前正在 backward 的 micro-batch 和当前 checkpoint segment 保存。它们生成后立即用于 backward，随后释放，不再从最早的 forward 一直跨越多个 micro-batch 长期驻留。
 
@@ -424,7 +424,7 @@ x → Layer 1 → z₁ → Layer 2 → z₂ → Layer 3 → z₃
 
 ### Q6：峰值激活公式中的第一项为什么来自全部 micro-batch？
 
-第一项统计所有 micro-batch 的 stage 入口 checkpoint 总量。每个入口对应 $N/M$ 个样本，共有 $M$ 个：
+第一项统计所有 micro-batch 的 stage 入口 checkpoint 总量。每个入口对应 $`N/M`$ 个样本，共有 $`M`$ 个：
 
 ```math
 M\times\frac{N}{M}=N
@@ -442,9 +442,9 @@ M\times\frac{N}{M}=N
 
 就是对“当前一个 micro-batch 的当前 stage 内部激活”的简化估计。
 
-### Q8：入口激活项是否应该写成 $N\times d$？
+### Q8：入口激活项是否应该写成 $`N\times d`$？
 
-对。如果 $N$ 是 mini-batch 的样本数量，且 stage 入口激活宽度也是 $d$，量纲一致的写法至少应为：
+对。如果 $`N`$ 是 mini-batch 的样本数量，且 stage 入口激活宽度也是 $`d`$，量纲一致的写法至少应为：
 
 ```math
 O\left(
@@ -453,7 +453,7 @@ Nd+
 \right)
 ```
 
-更一般地，如果边界宽度是 $d_b$，则应写成：
+更一般地，如果边界宽度是 $`d_b`$，则应写成：
 
 ```math
 O\left(
@@ -462,7 +462,7 @@ Nd_b+
 \right)
 ```
 
-Transformer 还应把序列长度 $S$ 计入激活形状。
+Transformer 还应把序列长度 $`S`$ 计入激活形状。
 
 ## 参考资料
 

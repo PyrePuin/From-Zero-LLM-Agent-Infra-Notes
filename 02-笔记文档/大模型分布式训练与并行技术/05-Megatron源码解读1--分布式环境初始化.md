@@ -373,9 +373,9 @@ torch.distributed.get_rank(
 
 其中：
 
-- $p$：Pipeline Parallel 坐标。
-- $d$：Data Parallel 坐标。
-- $t$：Tensor Parallel 坐标。
+- $`p`$：Pipeline Parallel 坐标。
+- $`d`$：Data Parallel 坐标。
+- $`t`$：Tensor Parallel 坐标。
 
 本例采用的 rank 排列方式为：
 
@@ -409,10 +409,10 @@ PP阶段3             [g12,g13]      [g14,g15]
 
 | 分组 | 固定坐标 | 改变坐标 | 含义 |
 | --- | --- | --- | --- |
-| TP | $(p,d)$ | $t$ | 同一层的不同张量分片 |
-| PP | $(d,t)$ | $p$ | 同一流水线的不同 stages |
-| DP | $(p,t)$ | $d$ | 同一模型分片的不同数据副本 |
-| MP | $d$ | $(p,t)$ | 一套完整模型副本包含的全部模型分片 |
+| TP | $`(p,d)`$ | $`t`$ | 同一层的不同张量分片 |
+| PP | $`(d,t)`$ | $`p`$ | 同一流水线的不同 stages |
+| DP | $`(p,t)`$ | $`d`$ | 同一模型分片的不同数据副本 |
+| MP | $`d`$ | $`(p,t)`$ | 一套完整模型副本包含的全部模型分片 |
 
 这四行是整段初始化代码的数学本质。
 
@@ -520,7 +520,7 @@ num_data_parallel_groups = (
 | TP | 2 | 8 |
 | PP | 4 | 4 |
 | DP | 2 | 8 |
-| MP | $TP\times PP=8$ | 2 |
+| MP | $`TP\times PP=8`$ | 2 |
 
 ---
 
@@ -604,7 +604,7 @@ for i in range(pipeline_model_parallel_size):
 
 由于 `num_pipeline_model_parallel_groups=4`：
 
-| $i$ | `start_rank` | `end_rank` | 当前 stage 的 ranks |
+| $`i`$ | `start_rank` | `end_rank` | 当前 stage 的 ranks |
 | ---: | ---: | ---: | --- |
 | 0 | 0 | 4 | g0～g3 |
 | 1 | 4 | 8 | g4～g7 |
@@ -748,7 +748,7 @@ for i in range(num_tensor_model_parallel_groups):
         _TENSOR_MODEL_PARALLEL_GROUP = group
 ```
 
-由于 TP 坐标 $t$ 是变化最快的维度，同一个 TP 组的 global ranks 连续排列：
+由于 TP 坐标 $`t`$ 是变化最快的维度，同一个 TP 组的 global ranks 连续排列：
 
 ```text
 i=0 → [g0,g1]
@@ -822,7 +822,7 @@ DP\times TP=2\times2=4
 
 个 rank。
 
-从相同的 $(d,t)$ 位置移动到下一个 PP stage，需要跨过 4 个 global ranks：
+从相同的 $`(d,t)`$ 位置移动到下一个 PP stage，需要跨过 4 个 global ranks：
 
 ```text
 g2 → g6 → g10 → g14
@@ -1016,7 +1016,7 @@ TP rank 0 ─┐
 TP rank 1 ─┘
 ```
 
-如果每张卡都长期保存完整 $X$，就存在冗余：
+如果每张卡都长期保存完整 $`X`$，就存在冗余：
 
 ```text
 GPU0：保存完整X
@@ -1210,7 +1210,7 @@ DP副本1的TP组：[g2,g3]
 
 ### Q5：为什么 DP 分组代码要先按 PP stage，再按 TP 分片循环？
 
-因为 DP group 必须固定 $(p,t)$，只改变 $d$：
+因为 DP group 必须固定 $`(p,t)`$，只改变 $`d`$：
 
 ```math
 DP\text{组}:固定(p,t)，改变d
@@ -1220,13 +1220,13 @@ DP\text{组}:固定(p,t)，改变d
 
 ### Q6：为什么 PP 组使用 `range(i, world_size, num_pipeline_model_parallel_groups)`？
 
-因为 rank 布局中一个 PP stage 占据 $DP\times TP$ 个连续 ranks，而：
+因为 rank 布局中一个 PP stage 占据 $`DP\times TP`$ 个连续 ranks，而：
 
 ```math
 \text{num pipeline groups}=DP\times TP
 ```
 
-保持 $(d,t)$ 不变、移动到下一个 $p$，global rank 就要增加这个步长。
+保持 $`(d,t)`$ 不变、移动到下一个 $`p`$，global rank 就要增加这个步长。
 
 ### Q7：每个进程会不会保存所有创建出来的 groups？
 
@@ -1268,13 +1268,13 @@ Megatron 初始化可以概括成五句话：
 
 1. 一个训练进程绑定一张 GPU，并获得 global rank。
 2. `init_process_group()` 建立包含所有进程的 World Group。
-3. 根据 $world\_size=TP\times PP\times DP$ 推导 DP。
+3. 根据 $`world\_size=TP\times PP\times DP`$ 推导 DP。
 4. `new_group(ranks)` 创建 TP、PP、DP、MP 和 Embedding 通信子组。
 5. 后续模块查询这些 group handles，完成真正的模型切分与训练通信。
 
-最重要的分组规律是：TP 固定 $(p,d)$ 改变 $t$；PP 固定 $(d,t)$ 改变 $p$；DP 固定 $(p,t)$ 改变 $d$；MP 固定 $d$，遍历 $(p,t)$。
+最重要的分组规律是：TP 固定 $`(p,d)`$ 改变 $`t`$；PP 固定 $`(d,t)`$ 改变 $`p`$；DP 固定 $`(p,t)`$ 改变 $`d`$；MP 固定 $`d`$，遍历 $`(p,t)`$。
 
-只要能够从任意 rank 写出它的 $(p,d,t)$ 坐标，这段初始化代码就不再是一组难记的 `range()`，而只是对三维坐标的不同切片。
+只要能够从任意 rank 写出它的 $`(p,d,t)`$ 坐标，这段初始化代码就不再是一组难记的 `range()`，而只是对三维坐标的不同切片。
 
 ## 参考资料
 

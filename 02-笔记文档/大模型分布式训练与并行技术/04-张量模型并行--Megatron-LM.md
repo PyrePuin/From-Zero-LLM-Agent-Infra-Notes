@@ -31,7 +31,7 @@ tags:
 Y=XW
 ```
 
-不同实现可能把权重存成转置形式，因此“行并行”“列并行”的代码命名要结合实际权重布局判断。这里始终以公式中的 $W$ 为准。
+不同实现可能把权重存成转置形式，因此“行并行”“列并行”的代码命名要结合实际权重布局判断。这里始终以公式中的 $`W`$ 为准。
 
 ## 一句话主线
 
@@ -72,12 +72,12 @@ GPU 3：Layer L 的参数分片 3
 
 | 符号 | 含义 |
 | --- | --- |
-| $b$ | batch size |
-| $s$ | sequence length |
-| $h$ | 输入 hidden size |
-| $h'$ | 输出 hidden size，MLP 中通常约为 $4h$ |
-| $V$ | vocabulary size |
-| $n$ | tensor parallel size |
+| $`b`$ | batch size |
+| $`s`$ | sequence length |
+| $`h`$ | 输入 hidden size |
+| $`h'`$ | 输出 hidden size，MLP 中通常约为 $`4h`$ |
+| $`V`$ | vocabulary size |
+| $`n`$ | tensor parallel size |
 
 输入和权重形状为：
 
@@ -94,7 +94,7 @@ Y=XW
 \in\mathbb{R}^{b\times s\times h'}
 ```
 
-为了简化推导，把前两个维度合并为 $T=b\times s$。不切分时，已知上游梯度 $dY$：
+为了简化推导，把前两个维度合并为 $`T=b\times s`$。不切分时，已知上游梯度 $`dY`$：
 
 ```math
 dW=X^\mathsf{T}dY
@@ -112,7 +112,7 @@ dX=dYW^\mathsf{T}
 
 ### 3.1 Forward
 
-沿 $W$ 的输出维度 $h'$ 切分：
+沿 $`W`$ 的输出维度 $`h'`$ 切分：
 
 ```math
 W=
@@ -127,7 +127,7 @@ W_0,W_1,\ldots,W_{n-1}
 W_i\in\mathbb{R}^{h\times h'/n}
 ```
 
-每个 rank 都拿到完整输入 $X$，本地计算：
+每个 rank 都拿到完整输入 $`X`$，本地计算：
 
 ```math
 Y_i=XW_i
@@ -143,7 +143,7 @@ Y_0,Y_1,\ldots,Y_{n-1}
 \right]
 ```
 
-如果下一个算子能够直接消费分片 $Y_i$，就不需要立即 All-Gather 完整 $Y$。
+如果下一个算子能够直接消费分片 $`Y_i`$，就不需要立即 All-Gather 完整 $`Y`$。
 
 ![按列切分后，各 GPU 得到不同输出特征分片](./assets/04-张量模型并行--Megatron-LM/04-column-parallel-forward.jpg)
 
@@ -164,7 +164,7 @@ dY_0,dY_1,\ldots,dY_{n-1}
 dW_i=X^\mathsf{T}dY_i
 ```
 
-这些 $dW_i$ 对应不同权重列，不需要相加。但是每个输出分片都依赖完整输入 $X$，rank $i$ 只能算出：
+这些 $`dW_i`$ 对应不同权重列，不需要相加。但是每个输出分片都依赖完整输入 $`X`$，rank $`i`$ 只能算出：
 
 ```math
 dX_i=dY_iW_i^\mathsf{T}
@@ -176,7 +176,7 @@ dX_i=dY_iW_i^\mathsf{T}
 dX=\sum_{i=0}^{n-1}dX_i
 ```
 
-因此列并行线性层在 backward 回到复制输入时，需要对 $dX_i$ 做 All-Reduce。
+因此列并行线性层在 backward 回到复制输入时，需要对 $`dX_i`$ 做 All-Reduce。
 
 ![列并行的 forward 输出分片与 backward 输入梯度求和](./assets/04-张量模型并行--Megatron-LM/05-column-parallel-forward-backward.jpg)
 
@@ -192,7 +192,7 @@ backward 的 dX 是不同贡献，求和关系
 
 ### 4.1 Forward
 
-沿 $W$ 的输入维度 $h$ 切分：
+沿 $`W`$ 的输入维度 $`h`$ 切分：
 
 ```math
 W=
@@ -223,7 +223,7 @@ Z_i=X_iW_i
 \in\mathbb{R}^{b\times s\times h'}
 ```
 
-每个 $Z_i$ 的形状都与完整输出相同，但数值上只是部分和：
+每个 $`Z_i`$ 的形状都与完整输出相同，但数值上只是部分和：
 
 ```math
 Y=\sum_{i=0}^{n-1}Z_i
@@ -245,7 +245,7 @@ dW_i=X_i^\mathsf{T}dY
 dX_i=dYW_i^\mathsf{T}
 ```
 
-$dX_i$ 对应输入 hidden 维的不同分片：
+$`dX_i`$ 对应输入 hidden 维的不同分片：
 
 ```math
 dX=
@@ -292,7 +292,7 @@ h'\approx4h
 
 ### 5.2 第一层列并行
 
-把 $A$ 按列切分：
+把 $`A`$ 按列切分：
 
 ```math
 A=
@@ -315,11 +315,11 @@ H_i=\mathrm{GELU}(XA_i)
 \left(b,s,\frac{h'}{n}\right)
 ```
 
-GELU 是逐元素函数，各 rank 可以直接对本地分片执行，无需恢复完整 $H$。
+GELU 是逐元素函数，各 rank 可以直接对本地分片执行，无需恢复完整 $`H`$。
 
 ### 5.3 第二层行并行
 
-把 $B$ 按行切分：
+把 $`B`$ 按行切分：
 
 ```math
 B=
@@ -328,7 +328,7 @@ B=
 B_i\in\mathbb{R}^{h'/n\times h}
 ```
 
-第一层的输出分片 $H_i$ 恰好对应第二层的输入分片。每个 rank 直接计算：
+第一层的输出分片 $`H_i`$ 恰好对应第二层的输入分片。每个 rank 直接计算：
 
 ```math
 Z_i=H_iB_i
@@ -341,7 +341,7 @@ Z_i=H_iB_i
 Z=\sum_{i=0}^{n-1}Z_i
 ```
 
-因此最后执行一次 All-Reduce，所有 TP ranks 得到相同的完整 $Z$。
+因此最后执行一次 All-Reduce，所有 TP ranks 得到相同的完整 $`Z`$。
 
 ![Megatron MLP：列并行、局部 GELU、行并行和最终求和](./assets/04-张量模型并行--Megatron-LM/07-mlp-tensor-parallel.jpg)
 
@@ -357,7 +357,7 @@ Z=\sum_{i=0}^{n-1}Z_i
 (b,s,h)
 ```
 
-最后一个 $(b,s,h)$ 在 All-Reduce 前只是局部部分和 $Z_i$，归约后才是完整 MLP 输出。
+最后一个 $`(b,s,h)`$ 在 All-Reduce 前只是局部部分和 $`Z_i`$，归约后才是完整 MLP 输出。
 
 ### 5.5 为什么中间不做 All-Gather
 
@@ -370,16 +370,16 @@ H_0,\ldots,H_{n-1}
 \right]
 ```
 
-每张 GPU 都会重新持有形状 $(b,s,h')$ 的宽激活，既增加通信，也抹掉激活分片的显存收益。列并行 $A$ 接行并行 $B$，就是为了让 $A$ 的输出分片直接成为 $B$ 的输入分片。
+每张 GPU 都会重新持有形状 $`(b,s,h')`$ 的宽激活，既增加通信，也抹掉激活分片的显存收益。列并行 $`A`$ 接行并行 $`B`$，就是为了让 $`A`$ 的输出分片直接成为 $`B`$ 的输入分片。
 
 ### 5.6 Backward
 
-已知完整上游梯度 $dZ$：
+已知完整上游梯度 $`dZ`$：
 
-1. 行并行 $B$ 在每个 rank 计算 $dH_i=dZB_i^\mathsf{T}$。
+1. 行并行 $`B`$ 在每个 rank 计算 $`dH_i=dZB_i^\mathsf{T}`$。
 2. 本地通过 GELU backward。
-3. 列并行 $A$ 计算 $dA_i$ 和输入梯度贡献 $dX_i$。
-4. 对 $dX_i$ 做 All-Reduce：
+3. 列并行 $`A`$ 计算 $`dA_i`$ 和输入梯度贡献 $`dX_i`$。
+4. 对 $`dX_i`$ 做 All-Reduce：
 
 ```math
 dX=\sum_idX_i
@@ -393,7 +393,7 @@ dX=\sum_idX_i
 
 ### 6.1 按完整 heads 切分
 
-设注意力头数为 $a$，每个 head 维度为 $d_h$：
+设注意力头数为 $`a`$，每个 head 维度为 $`d_h`$：
 
 ```math
 h=a\times d_h
@@ -419,9 +419,9 @@ O_j=
 
 ![普通 Multi-Head Attention](./assets/04-张量模型并行--Megatron-LM/09-multi-head-attention-baseline.jpg)
 
-Q、K、V 投影矩阵沿输出维度切分，每个 TP rank 获得一组完整 heads。每个 head 的 $Q_j$、$K_j$、$V_j$ 必须位于同一 rank，这样本地能够完整计算 Attention。
+Q、K、V 投影矩阵沿输出维度切分，每个 TP rank 获得一组完整 heads。每个 head 的 $`Q_j`$、$`K_j`$、$`V_j`$ 必须位于同一 rank，这样本地能够完整计算 Attention。
 
-标准 Multi-Head Attention 不会让 head $i$ 的 $Q_i$ 与 head $j$ 的 $K_j$ 相乘，因此不存在必须补齐的跨 rank “交叉 head”项。
+标准 Multi-Head Attention 不会让 head $`i`$ 的 $`Q_i`$ 与 head $`j`$ 的 $`K_j`$ 相乘，因此不存在必须补齐的跨 rank “交叉 head”项。
 
 ![Multi-Head Attention 按完整 heads 分配给不同 GPU](./assets/04-张量模型并行--Megatron-LM/10-multi-head-attention-tensor-parallel.jpg)
 
@@ -486,7 +486,7 @@ E\in\mathbb{R}^{V\times h}
 E_i\in\mathbb{R}^{V/n\times h}
 ```
 
-对输入 token $x$：
+对输入 token $`x`$：
 
 - 属于本地词表范围时，查出对应 embedding。
 - 不属于时，输出全零向量。
@@ -525,7 +525,7 @@ O_i=HW_i^\mathsf{T}
 
 ![输出词表投影沿 vocabulary 维度切分](./assets/04-张量模型并行--Megatron-LM/14-output-embedding.jpg)
 
-如果立即 All-Gather，每张 GPU 都会重建巨大 logits $(b,s,V)$。Vocabulary Parallel Cross Entropy 用分布式统计量避免这一步。
+如果立即 All-Gather，每张 GPU 都会重建巨大 logits $`(b,s,V)`$。Vocabulary Parallel Cross Entropy 用分布式统计量避免这一步。
 
 ---
 
@@ -533,7 +533,7 @@ O_i=HW_i^\mathsf{T}
 
 ### 8.1 普通 Cross Entropy
 
-对于某个 token，正确 token id 为 $y$：
+对于某个 token，正确 token id 为 $`y`$：
 
 ```math
 L
@@ -604,13 +604,13 @@ q=\sum_iq_i
 
 ### 8.4 正确类别 logit
 
-每个 rank 判断标签 $y$ 是否属于自己的词表范围。如果 $y\in\mathcal{V}_i$，则：
+每个 rank 判断标签 $`y`$ 是否属于自己的词表范围。如果 $`y\in\mathcal{V}_i`$，则：
 
 ```math
 t_i=o_y
 ```
 
-如果 $y\notin\mathcal{V}_i$，则：
+如果 $`y\notin\mathcal{V}_i`$，则：
 
 ```math
 t_i=0
@@ -696,9 +696,9 @@ dH=\sum_idH_i
 
 ---
 
-## 9. 通信量为什么会出现 $4\Phi$
+## 9. 通信量为什么会出现 $`4\Phi`$
 
-设形状 $(b,s,h)$ 的激活或梯度张量字节数为：
+设形状 $`(b,s,h)`$ 的激活或梯度张量字节数为：
 
 ```math
 \Phi=bsh\times\text{bytes-per-element}
@@ -716,8 +716,8 @@ V_{\mathrm{AR}}
 
 | 阶段 | 原因 |
 | --- | --- |
-| forward | 行并行输出 $Z_i$ 是部分和 |
-| backward | 列并行产生的 $dX_i$ 是输入梯度贡献 |
+| forward | 行并行输出 $`Z_i`$ 是部分和 |
+| backward | 列并行产生的 $`dX_i`$ 是输入梯度贡献 |
 
 所以：
 
@@ -727,7 +727,7 @@ V_{\mathrm{MLP}}
 4\frac{n-1}{n}\Phi
 ```
 
-当 $n$ 较大时近似为 $4\Phi$；当 $n=2$ 时精确值为 $2\Phi$。
+当 $`n`$ 较大时近似为 $`4\Phi`$；当 $`n=2`$ 时精确值为 $`2\Phi`$。
 
 Attention 模块也通常有一次 forward All-Reduce 和一次 backward All-Reduce。因此经典 Transformer layer 的 Attention 与 MLP 合计四次 All-Reduce；实际字节数还会受到 sequence parallel、通信融合、数据类型和张量布局影响。
 
@@ -747,7 +747,7 @@ TP=4,
 DP=2
 ```
 
-总 GPU 数为 $4\times2=8$：
+总 GPU 数为 $`4\times2=8`$：
 
 ```text
 DP replica 0：GPU 0～3，共同处理 batch 0
@@ -779,7 +779,7 @@ PP=2,
 DP=2
 ```
 
-总 GPU 数为 $2\times2\times2=8$。
+总 GPU 数为 $`2\times2\times2=8`$。
 
 参数归属按以下顺序理解：
 
@@ -843,11 +843,11 @@ Distributed Optimizer 在 DP 维度切分 FP32 master parameters 和 Adam states
 
 | 模块 | 第一部分 | 中间状态 | 第二部分 | 主要通信 |
 | --- | --- | --- | --- | --- |
-| MLP | $A$ 列并行 | $h'/n$ 激活分片 | $B$ 行并行 | forward、backward 各一次 All-Reduce |
+| MLP | $`A`$ 列并行 | $`h'/n`$ 激活分片 | $`B`$ 行并行 | forward、backward 各一次 All-Reduce |
 | Attention | QKV 列并行 | 完整 heads 分片 | 输出投影行并行 | forward、backward 各一次 All-Reduce |
 | Input Embedding | vocabulary 分片 | 本地命中或零向量 | 求和恢复 embedding | All-Reduce SUM |
-| Output Projection | vocabulary 分片 | 本地 logits $V/n$ | 直接进入并行 CE | 不 All-Gather 完整 logits |
-| Cross Entropy | 本地 max/sum/target | $(b,s)$ 统计量 | 全局 loss | MAX/SUM collectives |
+| Output Projection | vocabulary 分片 | 本地 logits $`V/n`$ | 直接进入并行 CE | 不 All-Gather 完整 logits |
+| Cross Entropy | 本地 max/sum/target | $`(b,s)`$ 统计量 | 全局 loss | MAX/SUM collectives |
 
 ---
 
@@ -855,18 +855,18 @@ Distributed Optimizer 在 DP 维度切分 FP32 master parameters 和 Adam states
 
 ### Q1：按列切和按行切的反向传播，与不切分有什么不同？
 
-数学上没有不同。不切分时单卡直接计算 $dW=X^\mathsf{T}dY$ 和 $dX=dYW^\mathsf{T}$。切分后：
+数学上没有不同。不切分时单卡直接计算 $`dW=X^\mathsf{T}dY`$ 和 $`dX=dYW^\mathsf{T}`$。切分后：
 
-- 列切的 $dW_i$ 是不同权重列；$dX_i$ 是对同一完整输入的不同贡献，需要求和。
-- 行切的 $dW_i$ 是不同权重行；$dX_i$ 是输入 hidden 维的不同分片，逻辑上拼接。
+- 列切的 $`dW_i`$ 是不同权重列；$`dX_i`$ 是对同一完整输入的不同贡献，需要求和。
+- 行切的 $`dW_i`$ 是不同权重行；$`dX_i`$ 是输入 hidden 维的不同分片，逻辑上拼接。
 
 ### Q2：MLP 是不是列切算完后，顺势进行一次行切运算？
 
-是，但权重不是运行时临时再切。第一层权重 $A$ 预先按列保存，第二层权重 $B$ 预先按行保存。$A$ 的本地输出 $H_i$ 直接成为 $B_i$ 的本地输入，中间不恢复完整 $H$。
+是，但权重不是运行时临时再切。第一层权重 $`A`$ 预先按列保存，第二层权重 $`B`$ 预先按行保存。$`A`$ 的本地输出 $`H_i`$ 直接成为 $`B_i`$ 的本地输入，中间不恢复完整 $`H`$。
 
 ### Q3：为什么最后不是 All-Gather，而是 All-Reduce？
 
-$H_i$ 是完整中间激活的不同特征分片，恢复 $H$ 才需要 All-Gather。但第二层的 $Z_i=H_iB_i$ 已经具有完整输出形状，只是数值上的部分和：
+$`H_i`$ 是完整中间激活的不同特征分片，恢复 $`H`$ 才需要 All-Gather。但第二层的 $`Z_i=H_iB_i`$ 已经具有完整输出形状，只是数值上的部分和：
 
 ```math
 Z=\sum_iZ_i
@@ -874,23 +874,23 @@ Z=\sum_iZ_i
 
 所以必须 All-Reduce。
 
-### Q4：MLP 的形状是不是 $(b,s,h)\rightarrow(b,s,h'/n)\rightarrow(b,s,h)$？
+### Q4：MLP 的形状是不是 $`(b,s,h)\rightarrow(b,s,h'/n)\rightarrow(b,s,h)`$？
 
-是。最后的 $(b,s,h)$ 在 All-Reduce 前只是 $Z_i$，归约后才是完整 $Z$。
+是。最后的 $`(b,s,h)`$ 在 All-Reduce 前只是 $`Z_i`$，归约后才是完整 $`Z`$。
 
-### Q5：不是只有 MLP 最后一次 All-Reduce 吗，通信量为什么写成 $4\Phi$？
+### Q5：不是只有 MLP 最后一次 All-Reduce 吗，通信量为什么写成 $`4\Phi`$？
 
-“最后一次”只描述 forward。backward 回到列并行输入时还要对 $dX_i$ 做一次 All-Reduce。两次 Ring All-Reduce 的精确单 rank 发送量为：
+“最后一次”只描述 forward。backward 回到列并行输入时还要对 $`dX_i`$ 做一次 All-Reduce。两次 Ring All-Reduce 的精确单 rank 发送量为：
 
 ```math
 4\frac{n-1}{n}\Phi
 ```
 
-$4\Phi$ 是 $n$ 较大时的近似。
+$`4\Phi`$ 是 $`n`$ 较大时的近似。
 
 ### Q6：Cross Entropy 为什么能不恢复完整 vocabulary logits？
 
-它只需要全词表最大值、指数和以及正确类别 logit。这些量都能由每个 rank 的局部统计量通过 MAX 或 SUM collective 得到，因此只需保存 $(b,s,V/n)$ 的本地 logits。
+它只需要全词表最大值、指数和以及正确类别 logit。这些量都能由每个 rank 的局部统计量通过 MAX 或 SUM collective 得到，因此只需保存 $`(b,s,V/n)`$ 的本地 logits。
 
 ### Q7：Megatron 是否意味着不同 GPU 不再按 layer 切分？
 
@@ -902,7 +902,7 @@ $4\Phi$ 是 $n$ 较大时的近似。
 
 ### Q9：PP 划分 layers 时，会连同梯度和优化器状态一起划分吗？
 
-会。某个 stage 只拥有分配给自己的 layers，所以也只产生这些 layers 的梯度，并只维护这些参数的 FP32 master parameters、Adam $m/v$ 等状态。之后还可以在同一 PP+TP shard 的 DP group 内继续使用 ZeRO 或 Distributed Optimizer。
+会。某个 stage 只拥有分配给自己的 layers，所以也只产生这些 layers 的梯度，并只维护这些参数的 FP32 master parameters、Adam $`m/v`$ 等状态。之后还可以在同一 PP+TP shard 的 DP group 内继续使用 ZeRO 或 Distributed Optimizer。
 
 ---
 

@@ -112,18 +112,18 @@ FP16 参数执行 forward / backward
 
 ### 2.2 Adam 到底保存什么
 
-设模型共有 $P$ 个参数。采用常见简化口径：
+设模型共有 $`P`$ 个参数。采用常见简化口径：
 
 | 状态 | 精度 | 每参数字节数 | 总显存 |
 | --- | --- | ---: | ---: |
-| 工作参数 $W_{16}$ | FP16 | 2 | $2P$ |
-| 梯度 $G_{16}$ | FP16 | 2 | $2P$ |
-| 主参数 $W_{32}$ | FP32 | 4 | $4P$ |
-| Adam 一阶动量 $m$ | FP32 | 4 | $4P$ |
-| Adam 二阶动量 $v$ | FP32 | 4 | $4P$ |
-| 合计 |  | 16 | $16P$ |
+| 工作参数 $`W_{16}`$ | FP16 | 2 | $`2P`$ |
+| 梯度 $`G_{16}`$ | FP16 | 2 | $`2P`$ |
+| 主参数 $`W_{32}`$ | FP32 | 4 | $`4P`$ |
+| Adam 一阶动量 $`m`$ | FP32 | 4 | $`4P`$ |
+| Adam 二阶动量 $`v`$ | FP32 | 4 | $`4P`$ |
+| 合计 |  | 16 | $`16P`$ |
 
-Adam 的核心状态是 $m$ 和 $v$；FP32 master 参数是混合精度更新额外维护的高精度权重。ZeRO 的显存分析通常把三者合称为 optimizer states：
+Adam 的核心状态是 $`m`$ 和 $`v`$；FP32 master 参数是混合精度更新额外维护的高精度权重。ZeRO 的显存分析通常把三者合称为 optimizer states：
 
 ```math
 M_{\mathrm{optimizer}}
@@ -143,20 +143,20 @@ M_{\mathrm{DDP}}
 ```
 
 > [!warning]
-> 原生 PyTorch `autocast` 通常让模型参数本身保持 FP32，只在算子执行时选择低精度，并不一定长期保存独立的 FP16 参数副本。上面的 $2P+2P+12P$ 是 ZeRO 论文和 DeepSpeed FP16 训练中常用的分析口径，不应机械套用到所有 AMP 实现。
+> 原生 PyTorch `autocast` 通常让模型参数本身保持 FP32，只在算子执行时选择低精度，并不一定长期保存独立的 FP16 参数副本。上面的 $`2P+2P+12P`$ 是 ZeRO 论文和 DeepSpeed FP16 训练中常用的分析口径，不应机械套用到所有 AMP 实现。
 
 ---
 
 ## 3. ZeRO 三阶段总览
 
-设数据并行规模为 $N$，忽略 activation、临时 buffer 和实现额外空间：
+设数据并行规模为 $`N`$，忽略 activation、临时 buffer 和实现额外空间：
 
 | 方案 | FP16 参数 | FP16 梯度 | 优化器相关状态 | 单卡模型状态显存 |
 | --- | ---: | ---: | ---: | ---: |
-| DDP | $2P$ | $2P$ | $12P$ | $16P$ |
-| ZeRO-1 | $2P$ | $2P$ | $12P/N$ | $4P+12P/N$ |
-| ZeRO-2 | $2P$ | $2P/N$ | $12P/N$ | $2P+14P/N$ |
-| ZeRO-3 | $2P/N$ | $2P/N$ | $12P/N$ | $16P/N$ |
+| DDP | $`2P`$ | $`2P`$ | $`12P`$ | $`16P`$ |
+| ZeRO-1 | $`2P`$ | $`2P`$ | $`12P/N`$ | $`4P+12P/N`$ |
+| ZeRO-2 | $`2P`$ | $`2P/N`$ | $`12P/N`$ | $`2P+14P/N`$ |
+| ZeRO-3 | $`2P/N`$ | $`2P/N`$ | $`12P/N`$ | $`16P/N`$ |
 
 ![ZeRO 从优化器状态、梯度到参数逐级消除数据并行冗余](./assets/03-数据并行技术--ZeRO与零冗余优化/12-zero-overview.jpg)
 
@@ -174,7 +174,7 @@ M_{\mathrm{DDP}}
 
 ### 4.1 每张 GPU 保存什么
 
-ZeRO-1 保留完整 FP16 参数和完整梯度，只把以下状态平均切到 $N$ 个 rank：
+ZeRO-1 保留完整 FP16 参数和完整梯度，只把以下状态平均切到 $`N`$ 个 rank：
 
 ```text
 FP32 master 参数
@@ -201,7 +201,7 @@ M_{\mathrm{ZeRO1}}
 4P+\frac{12P}{N}
 ```
 
-当 $N=4$：
+当 $`N=4`$：
 
 ```math
 M_{\mathrm{ZeRO1}}
@@ -209,7 +209,7 @@ M_{\mathrm{ZeRO1}}
 =7P
 ```
 
-相比 DDP 的 $16P$，只切最大的一类状态就已经获得明显收益。
+相比 DDP 的 $`16P`$，只切最大的一类状态就已经获得明显收益。
 
 ### 4.2 一次参数更新如何完成
 
@@ -232,11 +232,11 @@ M_{\mathrm{ZeRO1}}
 
 ### 4.3 ZeRO-1 的通信量为什么有两种答案
 
-设一个完整 FP16 参数或梯度张量大小为 $\Phi=2P$ bytes。对大规模 ring 近似：
+设一个完整 FP16 参数或梯度张量大小为 $`\Phi=2P`$ bytes。对大规模 ring 近似：
 
-- Reduce-Scatter 约发送 $\Phi$。
-- All-Gather 约发送 $\Phi$。
-- 完整 AllReduce 约发送 $2\Phi$。
+- Reduce-Scatter 约发送 $`\Phi`$。
+- All-Gather 约发送 $`\Phi`$。
+- 完整 AllReduce 约发送 $`2\Phi`$。
 
 严格按照“ZeRO-1 最终仍持有完整聚合梯度”的阶段定义：
 
@@ -254,7 +254,7 @@ M_{\mathrm{ZeRO1}}
 合计：约 2Φ
 ```
 
-因此，$3\Phi$ 是严格分类口径，$2\Phi$ 是更高效的实现路径。讨论通信量时应同时说明算法路径，而不能只写一个脱离实现的数字。
+因此，$`3\Phi`$ 是严格分类口径，$`2\Phi`$ 是更高效的实现路径。讨论通信量时应同时说明算法路径，而不能只写一个脱离实现的数字。
 
 ---
 
@@ -285,13 +285,13 @@ M_{\mathrm{ZeRO2}}
 
 ### 5.2 Reduce-Scatter 如何把梯度交给 owner
 
-每个 rank 处理不同数据，因此都会计算完整模型的局部梯度贡献。设梯度 bucket 被切成 $N$ 个 chunk：
+每个 rank 处理不同数据，因此都会计算完整模型的局部梯度贡献。设梯度 bucket 被切成 $`N`$ 个 chunk：
 
 ```math
 g_0^{(r)},g_1^{(r)},\ldots,g_{N-1}^{(r)}
 ```
 
-上标 $r$ 表示由 rank $r$ 的数据得到，下标表示参数分片。Reduce-Scatter 的目标是让 rank $j$ 最终得到：
+上标 $`r`$ 表示由 rank $`r`$ 的数据得到，下标表示参数分片。Reduce-Scatter 的目标是让 rank $`j`$ 最终得到：
 
 ```math
 G_j
@@ -311,7 +311,7 @@ N-1=3
 
 ### 5.3 梯度分片不等于只计算自己的梯度
 
-GPU 0 即使最终只负责 $G_0$，也要为完整模型计算本地梯度：
+GPU 0 即使最终只负责 $`G_0`$，也要为完整模型计算本地梯度：
 
 ```text
 g₀⁽⁰⁾ g₁⁽⁰⁾ g₂⁽⁰⁾ g₃⁽⁰⁾
@@ -325,7 +325,7 @@ g₀⁽⁰⁾ g₁⁽⁰⁾ g₂⁽⁰⁾ g₃⁽⁰⁾
 其他 rank 的梯度：只短暂接收一个 chunk/部分和，不保存完整副本
 ```
 
-因此，$2P/N$ 描述 Reduce-Scatter 后长期保留的梯度分片，不代表 backward 和通信期间的梯度峰值始终只有 $2P/N$。
+因此，$`2P/N`$ 描述 Reduce-Scatter 后长期保留的梯度分片，不代表 backward 和通信期间的梯度峰值始终只有 $`2P/N`$。
 
 实际实现使用 gradient bucket 控制峰值：
 
@@ -351,13 +351,13 @@ g₀⁽⁰⁾ g₁⁽⁰⁾ g₂⁽⁰⁾ g₃⁽⁰⁾
 → 每个 rank 继续持有完整且一致的 W16
 ```
 
-ZeRO-2 的 Reduce-Scatter 与参数 All-Gather 合计通信量约为 $2\Phi$，与普通 Ring-AllReduce 的量级相同，但它消除了梯度的长期复制。
+ZeRO-2 的 Reduce-Scatter 与参数 All-Gather 合计通信量约为 $`2\Phi`$，与普通 Ring-AllReduce 的量级相同，但它消除了梯度的长期复制。
 
 ---
 
 ## 6. ZeRO Stage 3：再分片参数
 
-### 6.1 每张卡长期只保存完整状态的 $1/N$
+### 6.1 每张卡长期只保存完整状态的 $`1/N`$
 
 ZeRO-3 将低精度参数也分片：
 
@@ -398,9 +398,9 @@ Backward 到该层前：再次 All-Gather 当前层参数
 
 最后，每个 rank 只更新自己的参数分片，不需要再恢复完整 FP32 optimizer states。
 
-### 6.3 ZeRO-3 的峰值并不等于 $16P/N$
+### 6.3 ZeRO-3 的峰值并不等于 $`16P/N`$
 
-$16P/N$ 是长期模型状态。计算某层时还需要：
+$`16P/N`$ 是长期模型状态。计算某层时还需要：
 
 ```math
 M_{\mathrm{peak}}
@@ -411,7 +411,7 @@ M_{\mathrm{peak}}
 +M_{\mathrm{buffers}}
 ```
 
-ZeRO-3 不会在每张卡上一次性重建整个模型的全部状态，最大的 $12P$ optimizer states 始终保持分片；临时重建的主要是当前层或当前 bucket 的低精度参数。
+ZeRO-3 不会在每张卡上一次性重建整个模型的全部状态，最大的 $`12P`$ optimizer states 始终保持分片；临时重建的主要是当前层或当前 bucket 的低精度参数。
 
 ### 6.4 ZeRO-3 为什么仍属于数据并行
 
@@ -430,7 +430,7 @@ ZeRO-3：不同数据分片 + 计算时完整层参数 + 状态分片存储
 
 ## 7. 三阶段通信量
 
-设 $\Phi$ 是完整低精度参数或梯度的字节数，$N$ 是数据并行规模。Ring 集合通信的精确单卡发送量为：
+设 $`\Phi`$ 是完整低精度参数或梯度的字节数，$`N`$ 是数据并行规模。Ring 集合通信的精确单卡发送量为：
 
 ```math
 V_{\mathrm{RS}}
@@ -450,15 +450,15 @@ V_{\mathrm{AR}}
 2\frac{N-1}{N}\Phi
 ```
 
-在 $N$ 较大时，可近似记作 $\Phi$、$\Phi$ 和 $2\Phi$。
+在 $`N`$ 较大时，可近似记作 $`\Phi`$、$`\Phi`$ 和 $`2\Phi`$。
 
 | 方案 | 主要集合通信 | 大规模近似单卡发送量 |
 | --- | --- | ---: |
-| DDP | 梯度 AllReduce | $2\Phi$ |
-| ZeRO-1 严格定义 | 梯度 AllReduce + 参数 All-Gather | $3\Phi$ |
-| ZeRO-1 高效实现 | 梯度 Reduce-Scatter + 参数 All-Gather | $2\Phi$ |
-| ZeRO-2 | 梯度 Reduce-Scatter + 参数 All-Gather | $2\Phi$ |
-| ZeRO-3 | forward 参数 All-Gather + backward 参数 All-Gather + 梯度 Reduce-Scatter | $3\Phi$ |
+| DDP | 梯度 AllReduce | $`2\Phi`$ |
+| ZeRO-1 严格定义 | 梯度 AllReduce + 参数 All-Gather | $`3\Phi`$ |
+| ZeRO-1 高效实现 | 梯度 Reduce-Scatter + 参数 All-Gather | $`2\Phi`$ |
+| ZeRO-2 | 梯度 Reduce-Scatter + 参数 All-Gather | $`2\Phi`$ |
+| ZeRO-3 | forward 参数 All-Gather + backward 参数 All-Gather + 梯度 Reduce-Scatter | $`3\Phi`$ |
 
 通信字节数不能直接等同于通信时间。真实时间还取决于：
 
@@ -487,7 +487,7 @@ M_D：Memory Defragmentation
 
 普通 Activation Checkpointing 通过只保留少量边界激活、backward 时重算 forward 来减少显存。ZeRO-R 进一步处理模型并行组内重复保存的 checkpoint 激活。
 
-假设 4 个张量并行 rank 共同处理同一 micro-batch，并重复保存同一个 checkpoint 激活 $A$：
+假设 4 个张量并行 rank 共同处理同一 micro-batch，并重复保存同一个 checkpoint 激活 $`A`$：
 
 ```text
 普通保存：
@@ -512,14 +512,14 @@ All-Gather A[0:4]
 → 用完释放完整 A
 ```
 
-长期每卡激活存储由 $A$ 降到 $A/4$，代价是额外 Activation All-Gather。还可以把激活分片 offload 到 CPU，进一步减少 GPU 常驻显存，但增加 CPU-GPU 传输。
+长期每卡激活存储由 $`A`$ 降到 $`A/4`$，代价是额外 Activation All-Gather。还可以把激活分片 offload 到 CPU，进一步减少 GPU 常驻显存，但增加 CPU-GPU 传输。
 
 > [!warning]
-> 纯 DDP 中每张 GPU 处理不同数据，激活 $A^{(0)},A^{(1)},\ldots$ 并不相同，不能把它们当作重复副本直接分片。ZeRO-R 的这项优化需要模型并行组中确实存在相同激活复制；具体张量布局将在 Megatron Tensor/Sequence Parallel 中继续展开。
+> 纯 DDP 中每张 GPU 处理不同数据，激活 $`A^{(0)},A^{(1)},\ldots`$ 并不相同，不能把它们当作重复副本直接分片。ZeRO-R 的这项优化需要模型并行组中确实存在相同激活复制；具体张量布局将在 Megatron Tensor/Sequence Parallel 中继续展开。
 
 ### 8.2 Constant-Size Buffers
 
-临时 buffer 并不是全部做状态分片，而是设置固定上限并循环复用。若张量大小 $S$ 大于 buffer 上限 $B$：
+临时 buffer 并不是全部做状态分片，而是设置固定上限并循环复用。若张量大小 $`S`$ 大于 buffer 上限 $`B`$：
 
 ```text
 第 1 块 B → 通信
@@ -648,7 +648,7 @@ GPU 显存下降
 
 使用 activation checkpoint 后，checkpoint 区域内部的大部分中间激活不再长期保留，只保存区域边界输入等必要内容，backward 时重新执行 forward 得到临时激活。
 
-### Q2：ZeRO-1 是否只把一个 $4P$ 的 optimizer state 拆开？
+### Q2：ZeRO-1 是否只把一个 $`4P`$ 的 optimizer state 拆开？
 
 不是。常见 FP16 + Adam 口径中，被分片的是：
 
@@ -656,7 +656,7 @@ GPU 显存下降
 4P_{W_{32}}+4P_m+4P_v=12P
 ```
 
-FP32 master 参数、Adam 一阶动量和二阶动量共同构成 optimizer 相关状态。ZeRO-1 仍完整保存 $2P$ 的 FP16 参数和 $2P$ 的梯度，所以单卡为 $4P+12P/N$。
+FP32 master 参数、Adam 一阶动量和二阶动量共同构成 optimizer 相关状态。ZeRO-1 仍完整保存 $`2P`$ 的 FP16 参数和 $`2P`$ 的梯度，所以单卡为 $`4P+12P/N`$。
 
 ### Q3：混合精度 Adam 的 master 参数具体如何存储？
 
@@ -668,17 +668,17 @@ W32：Adam 实际更新
 optimizer.state[W32]：step、exp_avg、exp_avg_sq
 ```
 
-更新完成后执行 $W_{16}\leftarrow\mathrm{cast}(W_{32})$。但在原生 PyTorch `autocast` 中，模型参数通常本来就是 FP32，不一定额外存在一份长期 FP16 参数；是否存在独立 master copy 取决于混合精度实现。
+更新完成后执行 $`W_{16}\leftarrow\mathrm{cast}(W_{32})`$。但在原生 PyTorch `autocast` 中，模型参数通常本来就是 FP32，不一定额外存在一份长期 FP16 参数；是否存在独立 master copy 取决于混合精度实现。
 
 ### Q4：ZeRO-2 的 Reduce-Scatter 会缓存其他 GPU 的完整梯度吗？
 
-不会。每个 rank 只短暂接收一个 chunk 或已经累加过的部分和，立即与本地对应 chunk 归约。它不会保存其他 $N-1$ 个 rank 的完整梯度副本。
+不会。每个 rank 只短暂接收一个 chunk 或已经累加过的部分和，立即与本地对应 chunk 归约。它不会保存其他 $`N-1`$ 个 rank 的完整梯度副本。
 
 但是 Reduce-Scatter 开始时，每个 rank 必须拥有当前 bucket 的完整本地梯度贡献，因为这些 chunk 尚未逐个加入归约过程。
 
-### Q5：GPU 0 最终只负责 $G_0$，为什么还要计算并暂存其他梯度？
+### Q5：GPU 0 最终只负责 $`G_0`$，为什么还要计算并暂存其他梯度？
 
-“负责 $G_0$”表示负责最终保存和更新第 0 个参数分片，不表示只计算第 0 个梯度。GPU 0 使用完整模型处理自己的数据，必须先计算：
+“负责 $`G_0`$”表示负责最终保存和更新第 0 个参数分片，不表示只计算第 0 个梯度。GPU 0 使用完整模型处理自己的数据，必须先计算：
 
 ```math
 g_0^{(0)},g_1^{(0)},\ldots,g_{N-1}^{(0)}
@@ -688,7 +688,7 @@ g_0^{(0)},g_1^{(0)},\ldots,g_{N-1}^{(0)}
 
 ### Q6：优化器状态才是显存大头，通信时为什么不会重新出现巨大峰值？
 
-FP16 + Adam 中 optimizer 相关状态约占模型状态的 $12P/16P=75\%$，而这些状态在 ZeRO 中始终保持分片，不需要 All-Gather 成完整副本。通信时临时聚合的主要是参数 layer/bucket 或梯度 bucket，因此模型状态不会重新涨回普通 DDP 的 $16P$。
+FP16 + Adam 中 optimizer 相关状态约占模型状态的 $`12P/16P=75\%`$，而这些状态在 ZeRO 中始终保持分片，不需要 All-Gather 成完整副本。通信时临时聚合的主要是参数 layer/bucket 或梯度 bucket，因此模型状态不会重新涨回普通 DDP 的 $`16P`$。
 
 但总峰值仍可能被长序列 activation、通信 buffer、最大聚合层和临时 FP32 更新 workspace 主导，不能只凭 optimizer states 判断一定不会 OOM。
 
@@ -708,7 +708,7 @@ FP16 + Adam 中 optimizer 相关状态约占模型状态的 $12P/16P=75\%$，而
 
 ### Q9：状态分片是不是一定会增加通信？
 
-通常会增加通信阶段、启动次数或对通信时序的要求，但总字节数不一定每个阶段都增加。ZeRO-1 的高效实现和 ZeRO-2 都可以保持与 DDP 相近的约 $2\Phi$ 单卡发送量；ZeRO-3 因 forward/backward 参数 All-Gather 增加到约 $3\Phi$。更小的 bucket 还会增加 collective 启动次数。
+通常会增加通信阶段、启动次数或对通信时序的要求，但总字节数不一定每个阶段都增加。ZeRO-1 的高效实现和 ZeRO-2 都可以保持与 DDP 相近的约 $`2\Phi`$ 单卡发送量；ZeRO-3 因 forward/backward 参数 All-Gather 增加到约 $`3\Phi`$。更小的 bucket 还会增加 collective 启动次数。
 
 因此，ZeRO 的权衡不是简单的“更多字节”，而是显存、带宽、延迟、通信计算 overlap 和实现复杂度之间的综合交换。
 
