@@ -60,7 +60,7 @@ PE_{(pos,2i+1)}
 Relative Position Bias 直接向 Attention logits 添加距离相关项：
 
 ```math
-\operatorname{score}_{ij}
+\mathrm{score}_{ij}
 =
 \frac{q_i^T k_j}{\sqrt{d_h}}
 + b(i-j)
@@ -73,7 +73,7 @@ Relative Position Bias 直接向 Attention logits 添加距离相关项：
 ALiBi 为不同 Attention head 设置不同斜率，并对较远位置施加更大的线性惩罚。对因果注意力中的 $`j\le i`$，可写成：
 
 ```math
-\operatorname{score}_{ij}
+\mathrm{score}_{ij}
 =
 \frac{q_i^T k_j}{\sqrt{d_h}}
 -m_h(i-j)
