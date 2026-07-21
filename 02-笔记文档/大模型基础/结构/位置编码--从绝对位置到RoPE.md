@@ -97,14 +97,14 @@ RoPE 不把位置向量加到输入 embedding，也不额外给 logits 加偏置
 \phi_i(p)=p\omega_i
 ```
 
-旋转矩阵为：
+位置 $`p`$ 的二维旋转作用记为 $`R_i(p)`$。为避免依赖矩阵环境，可以直接写成两个分量的变换：
 
 ```math
-R_i(p)=
-\begin{bmatrix}
-\cos\phi_i(p) & -\sin\phi_i(p)\\
-\sin\phi_i(p) & \cos\phi_i(p)
-\end{bmatrix}
+x'_{2i}=x_{2i}\cos\phi_i(p)-x_{2i+1}\sin\phi_i(p)
+```
+
+```math
+x'_{2i+1}=x_{2i}\sin\phi_i(p)+x_{2i+1}\cos\phi_i(p)
 ```
 
 于是对应的 Query 和 Key 变为：
