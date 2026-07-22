@@ -297,7 +297,12 @@ D_{\mathrm{JSD}(\beta)}(P\Vert Q)
 
 ## 7. 与强化学习结合
 
-On-Policy GKD 和 RL 都可以使用 Student 自己生成的序列，因此可以共享 Rollout。论文考虑同时最大化标量奖励 $`r(y)`$ 并匹配教师分布：
+On-Policy GKD 和 RL 都可以使用 Student 自己生成的序列，因此可以共享 Rollout，但它们提供的监督信号不同：
+
+- RL 用标量奖励评价完整序列，告诉 Student“这条结果整体好不好”；
+- GKD 在每个前缀上比较完整词表分布，告诉 Student“这一步应当怎样接近 Teacher”。
+
+论文考虑同时最大化标量奖励 $`r(y)`$ 并匹配教师分布：
 
 ```math
 \mathbb{E}_{x\sim X}
@@ -313,10 +318,54 @@ On-Policy GKD 和 RL 都可以使用 Student 自己生成的序列，因此可�
 
 $`\alpha`$ 控制蒸馏目标相对 RL 奖励的强度：
 
+- $`\alpha=0`$ 时只优化 RL 奖励；
 - $`\alpha=1`$ 时只执行蒸馏；
-- $`\alpha`$ 较小时更加重视奖励最大化。
+- $`0<\alpha<1`$ 时在奖励与教师能力之间折中。
 
-论文认为，这种组合可以在针对特定奖励优化学生时，继续通过教师蒸馏维持其他能力，从而缓解对齐过程中的能力损失。若希望以较少改动接入已有 RLHF/RLAIF 流程，作者建议考虑 Reverse KL 或 JSD(0.9)。
+### 7.1 一次联合训练怎样进行
+
+对于输入 $`x`$，当前 Student 先生成一条序列：
+
+```math
+y\sim p_S^\theta(\cdot\mid x)
+```
+
+同一条 Rollout 随后走向两条计算路径：
+
+```text
+                         ┌─ Reward Model / 奖励函数 → RL Loss
+Student Rollout：x → y ─┤
+                         └─ Teacher Token 分布 → GKD Loss
+```
+
+具体过程是：
+
+1. 奖励函数对完整输出 $`y`$ 打分，RL 使用策略梯度提高高奖励序列的生成概率；
+2. Teacher 与 Student 读取 $`y`$ 的相同前缀，逐位置计算 KL 或 JSD；
+3. 将 RL Loss 与 GKD Loss 加权求和，只更新 Student。
+
+从最小化损失的角度，可以简写为：
+
+```math
+L_{\mathrm{joint}}
+=
+(1-\alpha)L_{\mathrm{RL}}
++
+\alpha L_{\mathrm{GKD}}
+```
+
+RL 与 GKD 对离散 Rollout 的处理不同。RL 需要用 Reward 或 Advantage 形成策略梯度；GKD 不对采样动作反向传播，而是把生成完成的 $`y`$ 当作固定前缀，直接对 Student 的 Token 分布反向传播。二者虽然共享 Rollout，产生梯度的方式并不相同。
+
+### 7.2 $`\alpha`$ 与 $`\lambda`$ 不要混淆
+
+| 参数 | 控制什么 |
+| --- | --- |
+| $`\lambda`$ | GKD 训练前缀中，Student On-Policy 数据与固定数据的比例 |
+| $`\alpha`$ | 联合训练中，GKD Loss 与 RL Loss 的相对权重 |
+
+例如，$`\lambda=1`$、$`\alpha=0.3`$ 表示：GKD 完全使用 Student 自生成前缀，但总损失中 RL 权重为 0.7、GKD 权重为 0.3。
+
+论文认为，这种组合可以在针对特定奖励优化学生时，继续通过教师蒸馏维持其他能力，从而缓解只追逐单一奖励造成的能力损失。在 XSum 实验中，作者把基于文本蕴含的事实性奖励与 GKD 结合，在摘要质量和事实一致性之间形成由 $`\alpha`$ 控制的权衡。若希望以较少改动接入已有 RLHF/RLAIF 流程，作者建议考虑 Reverse KL 或 JSD(0.9)。
 
 ## 8. 实验设置
 
@@ -444,6 +493,13 @@ Student 越接近 Teacher 尺寸，在线生成在整体成本中的占比越高
 
 前面的第 6 节给出了两种 KL 的定义，本节进一步解释：它们究竟在关注什么、为什么会表现出不同的训练倾向，以及这种差异在 GKD 中有什么作用。
 
+可以先这样概括：
+
+- **Forward KL 更强调 Teacher 的完整要求。** 它按 Teacher 概率加权，推动 Student 在 Teacher 认可的各个方向上都尽量贴近 Teacher，即使其中一些模式对小模型较难学习；
+- **Reverse KL 更强调 Student 当前能够表达的区域。** 它按 Student 概率加权，允许容量有限的 Student 集中选择自己能够覆盖、同时又得到 Teacher 认可的模式，而不必勉强覆盖 Teacher 的全部模式。
+
+不过，Reverse KL 并不会显式判断 Student 的能力上限。上述“在能力范围内满足 Teacher”是它在容量受限时常表现出的优化倾向：Student 几乎没有覆盖的区域权重较小，而 Student 已经投入较多概率的区域会被重点检查是否符合 Teacher。
+
 ### 12.1 先固定一个前缀来看
 
 在某个输入 $`x`$ 和前缀 $`y_{<n}`$ 上，记教师、学生对下一个 Token 的完整词表分布为：
@@ -482,7 +538,19 @@ D_{\mathrm{KL}}(P\Vert Q)
 \sum_c P(c)\log Q(c)
 ```
 
-如果 $`z_c`$ 是学生在 Token $`c`$ 上的 Logit，其梯度具有非常直观的形式：
+在这个前缀上，Student 会先为整个词表输出一组未经 Softmax 的 Logit：
+
+```math
+z=(z_1,z_2,\ldots,z_M)
+```
+
+其中 $`z_c`$ 是词表中 Token $`c`$ 对应的一个标量分数，经过 Softmax 后得到：
+
+```math
+Q(c)=\frac{\exp(z_c)}{\sum_j\exp(z_j)}
+```
+
+$`z_c`$ 不是一个独立的模型参数，而是 Student 在当前前缀上的输出。损失对它的偏导数表示：如果稍微改变 Token $`c`$ 的 Logit，损失会怎样变化。Forward KL 对 $`z_c`$ 的梯度具有非常直观的形式：
 
 ```math
 \frac{\partial D_{\mathrm{KL}}(P\Vert Q)}{\partial z_c}
@@ -492,9 +560,11 @@ Q(c)-P(c)
 
 这意味着：
 
-- 学生概率低于教师概率时，训练会提高该 Token 的 Logit；
-- 学生概率高于教师概率时，训练会降低该 Token 的 Logit；
+- 学生概率低于教师概率时，梯度为负，梯度下降会提高该 Token 的 Logit；
+- 学生概率高于教师概率时，梯度为正，梯度下降会降低该 Token 的 Logit；
 - 只要教师给某个 Token 分配了明显概率，学生就很难完全忽略它。
+
+反向传播还会继续通过链式法则，把对所有 Logit 的梯度传回 Student 参数 $`\theta`$。由于 Softmax 将整个词表耦合在一起，改变一个 Logit 也会相对改变其他 Token 的概率。
 
 因此，Forward KL 常被称为具有 **Mode-Covering** 倾向：它希望学生覆盖教师支持的多种合理输出。它通常更有利于保留教师的分布信息和生成多样性，但容量较小的学生也可能被迫把有限概率分散到多个模式上。
 
