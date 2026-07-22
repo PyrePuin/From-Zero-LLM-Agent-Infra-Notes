@@ -179,43 +179,8 @@ c_j^{KV}
 > - “还原”在概念上是上投影恢复，在工程上往往是矩阵吸收后的等价计算，两者不等价但结果一致。
 > - 解耦 RoPE 不是说内容和位置语义无关，而是计算路径上的分离——最终 score 仍然是两者的组合。
 
-## 关联
-
-- 属于：推理优化
-- 相关：MHA变体：MQA与GQA、KV Cache、Attention、ROPE、Transformer
-- 用于：大模型推理实验
-
 ## 相关概念
 
 - MHA变体：MQA与GQA
 - KV Cache
 - ROPE
-
-## 附录：原笔记知识图谱
-
-原笔记最后一张图展示了作者当前的知识图谱。图中节点包括：
-
-- MHA变体：MQA与GQA
-- MLA
-- 稀疏注意力
-- 推理优化
-- Attention
-- QKV Bias
-- Transformer
-- 预训练
-- 参数高效微调
-- 数据链路增强
-- KV Cache
-- ROPE
-- 0.LLM学习地图
-- 后训练与对齐
-- Qwen2.5 技术报告阅读笔记
-- PPO 笔记片段
-- Scaling Law
-- LoRA实验
-- lora
-- Expert Iteration
-- GRPO
-- DPO
-- RLHF
-- 首页
