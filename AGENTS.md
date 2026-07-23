@@ -55,6 +55,25 @@ Prefer simple KaTeX commands already used successfully in the repository, includ
 
 Keep commands minimal. If ordinary symbols express the same idea, prefer the simpler expression.
 
+### Safe Subscript Notation
+
+Do not place a raw comparison character at the beginning of a braced subscript. GitHub's math translation layer can misparse forms such as:
+
+```text
+y_{<n}
+y_{>n}
+```
+
+and report `Extra open brace or missing close brace`, even though other LaTeX renderers may accept them.
+
+Prefer an explicit index range when it expresses the same meaning:
+
+```text
+y_{1:n-1}
+```
+
+If a comparison relation is essential, use a tested command such as `\lt` or `\gt` instead of a raw leading `<` or `>`. Keep the explicit index-range form as the repository default.
+
 ### Forbidden Commands and Environments
 
 Do not use these commands:
@@ -97,6 +116,14 @@ rg -n '^\$\$$|\\operatorname|\\tag|\\label|\\ref|\\newcommand|\\def|\\begin\{' '
 ```
 
 Expected result: no output.
+
+Also scan for raw comparison characters at the start of braced subscripts:
+
+```bash
+rg -n '_\{[<>]' '02-笔记文档'
+```
+
+Expected result: no output. Rewrite matches with an explicit index range such as `y_{1:n-1}`, or use a tested `\lt` / `\gt` relation when the range form would change the meaning.
 
 Check every Markdown file independently for paired code fences and inline-math delimiters:
 

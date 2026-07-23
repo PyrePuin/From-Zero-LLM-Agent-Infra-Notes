@@ -78,13 +78,13 @@ Student 匹配 Teacher 的分布
 y=(y_1,y_2,\ldots,y_{L_y})
 ```
 
-词表为 $`V`$，包含 $`M`$ 个 Token。在生成第 $`n`$ 个 Token 时，模型根据输入 $`x`$ 和已有前缀 $`y_{<n}`$，输出整个词表上的概率分布：
+词表为 $`V`$，包含 $`M`$ 个 Token。在生成第 $`n`$ 个 Token 时，模型根据输入 $`x`$ 和已有前缀 $`y_{1:n-1}`$，输出整个词表上的概率分布：
 
 ```math
-p(\cdot\mid y_{<n},x)\in(0,1)^M
+p(\cdot\mid y_{1:n-1},x)\in(0,1)^M
 ```
 
-论文把 $`p(y_n\mid y_{<n},x)`$ 简写为 $`p(y_n\mid x)`$。完整序列由模型逐 Token 采样得到：
+论文把 $`p(y_n\mid y_{1:n-1},x)`$ 简写为 $`p(y_n\mid x)`$。完整序列由模型逐 Token 采样得到：
 
 ```math
 y\sim p(\cdot\mid x)
@@ -103,11 +103,11 @@ p(y_n\mid x)=\frac{\exp(z_n/\gamma)}{\sum_{i=1}^{M}\exp(z_i/\gamma)}
 设教师模型为 $`p_T`$，带参数 $`\theta`$ 的学生模型为 $`p_S^\theta`$。给定同一个输入和输出前缀，第 $`n`$ 个位置上的教师、学生分布分别为：
 
 ```math
-p_T(\cdot\mid y_{<n},x)
+p_T(\cdot\mid y_{1:n-1},x)
 ```
 
 ```math
-p_S^\theta(\cdot\mid y_{<n},x)
+p_S^\theta(\cdot\mid y_{1:n-1},x)
 ```
 
 对输出序列 $`y`$，论文把序列级差异定义为所有位置 Token 级差异的平均：
@@ -118,9 +118,9 @@ D(p_T\Vert p_S^\theta)(y\mid x)
 \frac{1}{L_y}
 \sum_{n=1}^{L_y}
 D\left(
-p_T(\cdot\mid y_{<n},x)
+p_T(\cdot\mid y_{1:n-1},x)
 \Vert
-p_S^\theta(\cdot\mid y_{<n},x)
+p_S^\theta(\cdot\mid y_{1:n-1},x)
 \right)
 ```
 
@@ -176,7 +176,7 @@ On-Policy KD 不使用固定输出序列，而是先让当前学生模型生成�
 y\sim p_S(\cdot\mid x)
 ```
 
-然后在学生生成序列的每个中间前缀 $`y_{<n}`$ 上，计算教师与学生的 Token 级分布差异。采用 Forward KL 时，On-Policy Loss 为：
+然后在学生生成序列的每个中间前缀 $`y_{1:n-1}`$ 上，计算教师与学生的 Token 级分布差异。采用 Forward KL 时，On-Policy Loss 为：
 
 ```math
 L_{\mathrm{OD}}(\theta)
@@ -502,14 +502,14 @@ Student 越接近 Teacher 尺寸，在线生成在整体成本中的占比越高
 
 ### 12.1 先固定一个前缀来看
 
-在某个输入 $`x`$ 和前缀 $`y_{<n}`$ 上，记教师、学生对下一个 Token 的完整词表分布为：
+在某个输入 $`x`$ 和前缀 $`y_{1:n-1}`$ 上，记教师、学生对下一个 Token 的完整词表分布为：
 
 ```math
-P(c)=p_T(c\mid y_{<n},x)
+P(c)=p_T(c\mid y_{1:n-1},x)
 ```
 
 ```math
-Q(c)=p_S^\theta(c\mid y_{<n},x)
+Q(c)=p_S^\theta(c\mid y_{1:n-1},x)
 ```
 
 其中 $`c`$ 遍历词表中的所有 Token。Forward KL 与 Reverse KL 比较的是同一个前缀下的这两个完整分布，不是只比较教师或学生最终采样到的那个 Token。
