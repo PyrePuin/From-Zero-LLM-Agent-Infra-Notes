@@ -243,6 +243,22 @@ $`\lambda`$ 表示 Student Data Fraction，即 Student 自生成序列在训练�
 6. 只更新 Student 参数 θ。
 ```
 
+```mermaid
+flowchart TD
+    X["从数据集采样输入 x"] --> SOURCE{"u ≤ λ？"}
+    SOURCE -->|"是：On-Policy"| ROLLOUT["当前 Student 生成序列 y"]
+    SOURCE -->|"否：Fixed Data"| FIXED["读取固定输出序列 y"]
+    ROLLOUT --> PREFIX["将 y 作为固定序列并构造各位置前缀"]
+    FIXED --> PREFIX
+    PREFIX --> TEACHER["Teacher 输出每个位置的完整词表分布 P"]
+    PREFIX --> STUDENT["Student 输出每个位置的完整词表分布 Q"]
+    TEACHER --> DIV["逐 Token 计算 KL / JSD"]
+    STUDENT --> DIV
+    DIV --> AVG["对有效 Token 和 Batch 求平均"]
+    AVG --> UPDATE["反向传播：只更新 Student"]
+    UPDATE -.->|"进入下一 Step"| X
+```
+
 论文假设 Student 已经能够生成质量足以接受教师反馈的序列。因此实验不是从随机初始化开始，而是从经过 SFT 的学生检查点开始。这与 RLHF 常见的“先 SFT，再在线优化”流程类似。
 
 ## 6. 散度选择
@@ -332,10 +348,19 @@ y\sim p_S^\theta(\cdot\mid x)
 
 同一条 Rollout 随后走向两条计算路径：
 
-```text
-                         ┌─ Reward Model / 奖励函数 → RL Loss
-Student Rollout：x → y ─┤
-                         └─ Teacher Token 分布 → GKD Loss
+```mermaid
+flowchart LR
+    X["输入 x"] --> ROLLOUT["Student 生成 Rollout y"]
+    ROLLOUT --> REWARD["Reward Model / 奖励函数"]
+    REWARD --> RL["序列级 RL Loss"]
+    ROLLOUT --> PREFIX["构造 Student 实际访问的前缀"]
+    PREFIX --> TEACHER["Teacher Token 分布"]
+    PREFIX --> STUDENT["Student Token 分布"]
+    TEACHER --> OPD["逐 Token OPD Loss"]
+    STUDENT --> OPD
+    RL --> JOINT["加权得到 Joint Loss"]
+    OPD --> JOINT
+    JOINT --> UPDATE["只更新 Student"]
 ```
 
 具体过程是：
