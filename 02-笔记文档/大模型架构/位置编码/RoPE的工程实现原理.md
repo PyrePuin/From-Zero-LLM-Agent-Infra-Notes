@@ -1,7 +1,7 @@
 ---
 type: concept
 status: seed
-domain: 大模型基础/结构
+domain: 大模型架构/位置编码
 created: 2026-07-22
 updated: 2026-07-22
 aliases: [RoPE Implementation, Rotary Position Embedding Implementation, 旋转位置编码实现]
