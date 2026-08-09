@@ -3,7 +3,7 @@ type: paper-note
 status: active
 domain: 多模态/VLM
 created: 2026-08-09
-updated: 2026-08-09
+updated: 2026-08-10
 aliases: [ViT, Vision Transformer, 视觉 Transformer]
 tags: [Multimodal, VLM, ViT, Vision-Transformer, Patch-Embedding, Self-Attention]
 ---
@@ -68,8 +68,9 @@ flowchart LR
     E --> F["Transformer Encoder Block × L"]
     F --> G["LayerNorm"]
     G --> H["Take Final CLS<br/>Global Image Representation"]
-    H --> I["MLP / Linear Head"]
-    I --> J["Class Logits"]
+    H --> I["Classification Head<br/>W_cls h_cls + b_cls"]
+    I --> J["Class Logits<br/>K 个类别分数"]
+    J --> R["Argmax / Softmax<br/>预测类别"]
 
     subgraph BLOCK["Encoder Block"]
         direction TB
@@ -114,6 +115,59 @@ x_p\in\mathbb{R}^{N\times(P^2C)}
 | Encoder 输出 | $`197\times D`$ | 每个 Token 都变成上下文表示 |
 | 最终 CLS | $`D`$ | 当前图片的全局任务表示 |
 | 分类 Logits | $`K`$ | $`K`$ 个下游类别的分数 |
+
+### 3.1 最终 CLS 到底怎样完成分类
+
+这里最容易混淆的是“初始 CLS”和“最终 CLS”：
+
+```text
+初始 CLS
+= 一份所有图片共用的可学习参数
+= 此时还没有当前图片的信息
+
+最终 CLS
+= 初始 CLS 与当前图片的 Patch 一起经过 L 层 Encoder 后
+  位于序列第 0 号位置的输出向量
+= 已经通过 Self-Attention 融合了当前图片中与任务相关的信息
+```
+
+假设最后一层 Encoder 的输出为 $`z_L\in\mathbb{R}^{(N+1)\times D}`$，ViT 先取第 0 个位置，也就是最终 CLS：
+
+```math
+h_{\mathrm{cls}}=\mathrm{LN}(z_L^0)
+```
+
+然后把它送进一个分类头。若共有 $`K`$ 个类别，最简单的分类头就是一个线性层：
+
+```math
+\mathrm{logits}=W_{\mathrm{cls}}h_{\mathrm{cls}}+b_{\mathrm{cls}}
+```
+
+其中 $`W_{\mathrm{cls}}\in\mathbb{R}^{K\times D}`$，因此输出是 $`K`$ 个分数。例如猫、狗、汽车三个类别可能得到：
+
+```text
+最终 CLS: [D 维图片表示]
+        ↓ 分类头
+logits: [猫: 2.7, 狗: 0.4, 汽车: -1.2]
+        ↓ 取最大值
+预测结果: 猫
+```
+
+训练时，用真实类别和 logits 计算交叉熵损失。因为分类头只能看到最终 CLS，损失的梯度会沿着下面的路径反向传播：
+
+```text
+真实标签
+→ 分类损失
+→ 分类头
+→ 最终 CLS
+→ CLS 在各层中的 Self-Attention
+→ Patch Token、Patch Embedding 和整个 Encoder
+```
+
+这就是 CLS 能逐渐学会汇总图片信息的直接原因：**模型若想把类别预测正确，就必须让最终 CLS 包含足以区分类别的信息。** 推理时仍执行相同的前向过程，只是不计算损失、不更新参数，直接根据 logits 得到预测类别。
+
+> [!important]
+> CLS 不是一个预先写好“负责总结”的特殊算子。它之所以成为全局分类表示，是因为它能通过 Self-Attention 读取所有 Patch，并且分类头被设计成只读取它；结构提供了信息通道，分类损失提供了学习压力。
 
 ## 4. Patch Embedding：把图像变成 Token
 
@@ -333,64 +387,7 @@ patch_2 ↔ 所有 Patch
 | 目标 | 得到输入表示 | 预测下一个 Token |
 | 原始输出 | 图像表示和分类 | 生成 Token 概率 |
 
-### 7.3 用 ViT 做图文生成时如何接 Decoder
-
-如果任务是看图生成文本，可以将 ViT 所有 Patch 输出交给文本 Decoder：
-
-```text
-图片
-→ ViT Encoder
-→ 视觉 Patch 表示
-→ Text Decoder Cross-Attention
-→ 自回归生成文本
-```
-
-在标准 Encoder–Decoder Cross-Attention 中：
-
-```text
-Q = Decoder 当前文本状态
-K = ViT 输出
-V = ViT 输出
-```
-
-LLaVA 和部分 Qwen-VL 类模型则使用 Decoder-only 路线：先用 Projector 将 ViT 特征变成与 LLM 同维度的视觉 Token，再把视觉 Token 和文本 Token 放入统一的因果序列。这时不一定存在独立的 Cross-Attention 层。
-
-## 8. Patch 大小与输入分辨率
-
-### 8.1 一个检查点的 Patch 大小通常固定
-
-模型名中的后缀直接表示 Patch 边长：
-
-```text
-ViT-B/16 → Base 规模，16 × 16 Patch
-ViT-B/32 → Base 规模，32 × 32 Patch
-ViT-H/14 → Huge 规模，14 × 14 Patch
-```
-
-Patch Embedding 权重形状与 $`P`$ 绑定。若用 Conv2d 实现，ViT-B/16 的权重空间形状包含 $`16\times16`$，推理时不能突然改成 $`8\times8`$ 而仍直接复用原权重。
-
-### 8.2 固定的是 Patch 大小，可变的是 Patch 数量
-
-对 ViT-B/16：
-
-```text
-224 × 224 图片 → 14 × 14 = 196 个 Patch
-384 × 384 图片 → 24 × 24 = 576 个 Patch
-```
-
-图片分辨率可以变化，但需要处理位置编码，且图片尺寸通常需要能被 Patch 大小整除；否则要先 resize、crop 或 padding。
-
-### 8.3 小 Patch 更精细，但计算更贵
-
-在图片尺寸不变时，Patch 边长减半，Patch 数量增加四倍。标准 Self-Attention 的两两交互部分随 Token 数的平方增长，因此这部分的计算约增加十六倍。
-
-| Patch 大小 | $`224\times224`$ 图片的 Patch 数 | 特点 |
-| --- | ---: | --- |
-| $`32\times32`$ | 49 | 计算便宜，细节粗糙 |
-| $`16\times16`$ | 196 | 常见折中 |
-| $`8\times8`$ | 784 | 细节更多，Attention 显著更贵 |
-
-## 9. ViT 的视觉归纳偏置
+## 8. ViT 的视觉归纳偏置
 
 CNN 把一些图像结构直接写进网络：
 
@@ -405,9 +402,9 @@ ViT 显式使用二维结构的地方很少：
 
 进入 Encoder 后，Attention 是全局的，局部性、行列结构和物体空间关系主要由数据学出。这解释了原始 ViT 为什么在数据较少时容易不如 CNN，也解释了它为什么更依赖大规模预训练。
 
-## 10. 预训练、微调和分类
+## 9. 预训练、微调和分类
 
-### 10.1 原论文的预训练方式
+### 9.1 原论文的预训练方式
 
 原始 ViT 论文主要使用有监督图像分类预训练，而不是后来 MAE 那样的遮挡重建，也不是 CLIP 那样的图文对比学习。
 
@@ -427,7 +424,7 @@ ViT 显式使用二维结构的地方很少：
 较大数据：ViT 的扩展能力逐渐显现
 ```
 
-### 10.2 下游微调
+### 9.2 下游微调
 
 迁移到新分类任务时，删除原预训练分类头，再接一个 $`D\times K`$ 的新分类头，其中 $`K`$ 是下游类别数。原论文的典型路线是：
 
@@ -438,7 +435,7 @@ ViT 显式使用二维结构的地方很少：
 → 使用最终 CLS 分类
 ```
 
-## 11. ViT 与现代 VLM 的关系
+## 10. ViT 与现代 VLM 的关系
 
 ViT 为 VLM 提供的不是文本生成能力，而是一组可以与语言模型对齐的视觉 Token：
 
@@ -460,7 +457,7 @@ ViT 之后的学习问题也因此自然变成：
 3. 如何在保留细节的同时减少视觉 Token 数？
 4. 如何处理动态分辨率、任意宽高比和视频时间维度？
 
-## 12. 常见易混点
+## 11. 常见易混点
 
 | 误解 | 准确理解 |
 | --- | --- |
@@ -470,11 +467,9 @@ ViT 之后的学习问题也因此自然变成：
 | CLS 保存整张图片的全部像素 | CLS 是为当前目标学出的有损全局表示 |
 | 推理阶段不再需要 CLS | 原始 ViT 训练和推理都使用 CLS |
 | 可学习位置编码需要每张新图重训 | 它是整个模型在训练数据上一次学得的共享参数 |
-| 一个 ViT 可以随意改 Patch 大小 | Patch Embedding 参数与 Patch 大小绑定，普通推理时保持固定 |
-| Encoder 输出在 Cross-Attention 中作为 Q/K | 标准 Cross-Attention 中 Decoder 状态是 Q，Encoder 输出是 K/V |
 | ViT 是 Encoder 只因为输入图片完整 | 更根本的原因是双向 Attention、无 Causal Mask，目标是编码而非自回归生成 |
 
-## 13. 最小伪代码
+## 12. 最小伪代码
 
 ```python
 def vit_forward(images):
@@ -497,7 +492,7 @@ def vit_forward(images):
     return logits
 ```
 
-## 14. 阅读论文时应能回答的问题
+## 13. 阅读论文时应能回答的问题
 
 1. ViT-B/16 中的 `B` 和 `16` 分别表示什么？
 2. $`224\times224`$ 图片为什么产生 196 个 Patch Token？
@@ -506,11 +501,10 @@ def vit_forward(images):
 5. 为什么可学习位置编码不需要在推理新图片时重新训练？
 6. 高分辨率微调时，为什么只插值 Patch 位置编码而不插值 CLS？
 7. ViT 为什么是 Encoder，它和自回归 Decoder 的 Attention Mask 有什么不同？
-8. 为什么减小 Patch 可以保留更多细节，却会显著增加 Attention 成本？
-9. 为什么原始 ViT 比 CNN 更依赖大规模预训练？
-10. 在 VLM 中，为什么通常要保留多个 Patch Token，而不只使用 CLS？
+8. 为什么原始 ViT 比 CNN 更依赖大规模预训练？
+9. 在 VLM 中，为什么通常要保留多个 Patch Token，而不只使用 CLS？
 
-## 15. 核心总结
+## 14. 核心总结
 
 ```text
 ViT
@@ -521,10 +515,9 @@ ViT
 + Task Head
 ```
 
-必须记住的五点：
+必须记住的四点：
 
 1. **Patchify 只是切分，Patch Embedding 还包含线性投影。**
 2. **CLS 通过 Self-Attention 读取 Patch，并在分类损失的压力下学会聚合任务相关的全局信息。**
 3. **位置编码是训练后共享的模型参数，新图片推理不需要重新学习。**
-4. **一个检查点的 Patch 大小通常固定，输入分辨率变化会改变 Patch 和视觉 Token 数量。**
-5. **ViT 是无 Causal Mask 的双向 Encoder；它负责视觉编码，生成任务需要再接 Decoder 或 Decoder-only LLM。**
+4. **ViT 是无 Causal Mask 的双向 Encoder；它负责把完整图片编码为上下文化的视觉表示。**
