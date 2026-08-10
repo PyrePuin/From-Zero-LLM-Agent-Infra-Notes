@@ -82,7 +82,21 @@ CLIP 将监督信号从固定类别编号换成互联网上天然存在的图文
 
 其中 `(1)` 是训练，`(2)` 和 `(3)` 是下游 Zero-shot 推理。
 
-## 3. 双塔架构
+## 3. CLIP 的对比预训练
+
+本节把一次完整训练按照真实数据流组织起来：
+
+```text
+图文双塔编码
+→ 线性投影到共同空间
+→ Batch 内逐向量 L2 归一化
+→ 构造 N × N 图文相似度矩阵
+→ 计算 Image-to-Text 与 Text-to-Image 交叉熵
+→ 两个损失取平均
+→ 反向传播并更新全部可学习参数
+```
+
+### 3.1 双塔架构
 
 CLIP 是双塔模型：
 
@@ -96,7 +110,7 @@ CLIP 是双塔模型：
 
 两个 Encoder 的参数不共享，但它们的输出最终会被投影到相同的 $`D`$ 维空间。
 
-### 3.1 Image Encoder
+#### 3.1.1 Image Encoder
 
 原始 CLIP 实验了两类视觉编码器：
 
@@ -123,7 +137,7 @@ h_i^I=f_\theta(I_i)
 
 其中 $`h_i^I`$ 是图像侧的单模态全局特征。
 
-### 3.2 Text Encoder
+#### 3.1.2 Text Encoder
 
 原始 CLIP 的 Text Encoder 是一个使用 Causal Attention Mask 的 Transformer。它不是 BERT 风格的完全双向 Encoder：当前位置只能读取自己和前面的文本 Token。
 
@@ -147,7 +161,7 @@ h_i^T=g_\phi(T_i)
 
 其中 $`h_i^T`$ 是文本侧的单模态全局特征。
 
-### 3.3 Encoder 后是线性投影，不是额外 MLP
+#### 3.1.3 Encoder 后是线性投影，不是额外 MLP
 
 图像特征和文本特征的原始维度可能不同，因此分别使用一个可学习线性矩阵：
 
@@ -171,7 +185,7 @@ h_i^T=g_\phi(T_i)
 
 原始 CLIP 在这里使用线性投影。ViT 和 Text Transformer 内部都有 MLP Block，但不能因此把 Encoder 后的投影层说成额外 MLP。
 
-## 4. 一个 Batch 的完整张量流
+### 3.2 一个 Batch 的完整张量流
 
 假设一个 Batch 中有 $`N`$ 对图文数据：
 
@@ -198,7 +212,7 @@ h_i^T=g_\phi(T_i)
 
 不需要另外为每张图片人工采样负文本，因为 Batch 中其他图片的文本就充当负样本。
 
-## 5. L2 归一化与余弦相似度
+### 3.3 L2 归一化与余弦相似度
 
 投影后的图像和文本向量分别做 L2 归一化：
 
@@ -231,7 +245,7 @@ v_i^{\mathsf{T}}t_j=\cos(v_i,t_j)
 > [!warning]
 > 这里是 L2 Normalization，不是 LayerNorm。L2 Normalization 把每个向量的长度缩放为 1；LayerNorm 则按照特征的均值和方差进行标准化。
 
-## 6. 图文相似度矩阵
+### 3.4 图文相似度矩阵
 
 将归一化后的图像向量堆叠为：
 
@@ -275,7 +289,7 @@ $`s_{ij}`$ 表示第 $`i`$ 张图片与第 $`j`$ 段文本的匹配分数。
 
 正确图文对位于对角线，但并不是只有对角线参与损失。每一行和每一列的全部元素都会进入 Softmax 分母，并获得梯度。
 
-## 7. 对称图文对比损失
+### 3.5 对称图文对比损失
 
 CLIP 将相似度矩阵解释成两个方向的分类问题：
 
@@ -284,7 +298,7 @@ CLIP 将相似度矩阵解释成两个方向的分类问题：
 
 两个方向分别计算交叉熵，最后取平均。
 
-### 7.1 Image-to-Text：按行分类
+#### 3.5.1 Image-to-Text：按行分类
 
 固定第 $`i`$ 张图片，对第 $`i`$ 行做 Softmax：
 
@@ -318,7 +332,7 @@ L_{I\rightarrow T}
 图片 i → 应选择文本 i
 ```
 
-### 7.2 Text-to-Image：按列分类
+#### 3.5.2 Text-to-Image：按列分类
 
 固定第 $`i`$ 段文本，对相似度矩阵第 $`i`$ 列做 Softmax：
 
@@ -349,7 +363,7 @@ L_{T\rightarrow I}
 loss_text = cross_entropy(similarity_matrix.T, labels)
 ```
 
-### 7.3 两个方向取平均
+#### 3.5.3 两个方向取平均
 
 最终 CLIP 损失为：
 
@@ -372,7 +386,7 @@ L_{T\rightarrow I}
                      → 按列交叉熵：文本选择图片
 ```
 
-## 8. 交叉熵怎样推动图文向量移动
+### 3.6 交叉熵怎样推动图文向量移动
 
 对于 Image-to-Text 方向，定义标签矩阵 $`y_{ij}`$：对角线为 1，其他位置为 0。交叉熵对相似度的梯度为：
 
@@ -429,7 +443,7 @@ s_{ij}=\frac{v_i^{\mathsf{T}}t_j}{\tau}
 > [!important]
 > 对角线只负责指出正确类别。非对角线元素同样出现在 Softmax 分母中，并且都会获得梯度。
 
-## 9. Temperature 与 Logit Scale
+### 3.7 Temperature 与 Logit Scale
 
 相似度公式中的 $`\tau`$ 是 Temperature：
 
@@ -454,7 +468,7 @@ s_{ij}=\exp(a)v_i^{\mathsf{T}}t_j
 
 这个参数与两个 Encoder、两个投影矩阵一起参与反向传播和优化。
 
-## 10. 参数如何更新
+### 3.8 参数如何更新
 
 一次训练迭代包含：
 
@@ -499,7 +513,7 @@ L_CLIP
 
 $`\eta`$ 是学习率。实际训练使用 Adam 一类优化器，但核心仍然是根据最终对比损失同时更新两个模态的完整计算链路。
 
-## 11. 最小训练伪代码
+### 3.9 最小训练伪代码
 
 ```python
 def clip_loss(images, texts):
@@ -543,11 +557,11 @@ optimizer.step()
 
 Cross-Entropy 内部已经包含 LogSoftmax，一般不需要在传入损失函数前手动执行 Softmax。
 
-## 12. Zero-shot 分类
+## 4. Zero-shot 分类
 
 Zero-shot 分类不是让 CLIP 自动生成一个类别名称，而是提前给出候选类别，让模型选择最匹配的文本。
 
-### 12.1 用类别文本动态构造分类器
+### 4.1 用类别文本动态构造分类器
 
 假设候选类别是：
 
@@ -584,7 +598,7 @@ T_{\mathrm{class}}\in\mathbb{R}^{K\times D}
 
 这个矩阵在功能上相当于传统线性分类器的权重，但它不是用目标任务标注图片训练出来的，而是由类别文本动态生成的。
 
-### 12.2 编码新图片并选择类别
+### 4.2 编码新图片并选择类别
 
 新图片经过 Image Encoder、投影和归一化得到 $`v`$：
 
@@ -621,7 +635,7 @@ p_k=\frac{\exp(s_k)}{\sum_{j=1}^{K}\exp(s_j)}
 > [!warning]
 > 图中最后的 `A photo of a dog.` 是从候选 Prompt 中选中的文本，不是 CLIP 现场生成的图片描述。
 
-### 12.3 为什么叫 Zero-shot
+### 4.3 为什么叫 Zero-shot
 
 Zero-shot 表示：
 
@@ -647,7 +661,7 @@ Zero-shot 表示：
 任务 C：happy、sad、angry
 ```
 
-### 12.4 Prompt Ensembling
+### 4.4 Prompt Ensembling
 
 单个模板可能带来语言偏差，因此可以为同一类别使用多个 Prompt：
 
@@ -672,7 +686,7 @@ a photo of the dog
 
 这叫 Prompt Ensembling，可以降低模型对某一个模板措辞的敏感性。
 
-## 13. 预训练与 Zero-shot 推理的区别
+### 4.5 预训练与 Zero-shot 推理的区别
 
 | 对比维度 | 对比预训练 | Zero-shot 推理 |
 | --- | --- | --- |
@@ -686,7 +700,7 @@ a photo of the dog
 
 预训练阶段学习“图片与自然语言怎样对应”；Zero-shot 阶段复用这种能力，将类别文本当作动态分类器。
 
-## 14. CLIP 的能力边界
+## 5. CLIP 的能力边界
 
 CLIP 擅长：
 
@@ -706,7 +720,7 @@ CLIP 本身不擅长：
 
 另一个训练问题是 False Negative：Batch 中两个非配对样本可能具有相同或相近语义，例如两张狗图片配上两段狗描述。标准 CLIP 仍将非对角线位置当作负样本，这并不总是符合真实语义。
 
-## 15. CLIP 与现代 VLM 的关系
+## 6. CLIP 与现代 VLM 的关系
 
 CLIP 的视觉侧最终通常输出单个全局向量：
 
@@ -741,7 +755,7 @@ LLaVA / Qwen-VL 等生成式 VLM
 解决视觉 Token 怎样接入 LLM 并生成答案
 ```
 
-## 16. 常见易混点
+## 7. 常见易混点
 
 | 误解 | 准确理解 |
 | --- | --- |
@@ -756,7 +770,7 @@ LLaVA / Qwen-VL 等生成式 VLM
 | Zero-shot 表示预训练从未见过概念 | 它表示不使用目标任务的标注样本进行训练或微调 |
 | 最后的类别文本是 CLIP 生成的 | 它是从预先提供的候选 Prompt 中选择出来的 |
 
-## 17. 阅读论文后应能回答的问题
+## 8. 阅读论文后应能回答的问题
 
 1. CLIP 为什么要使用两个独立 Encoder？
 2. Encoder 输出为什么还要经过线性投影？
@@ -771,7 +785,7 @@ LLaVA / Qwen-VL 等生成式 VLM
 11. 为什么类别文本向量可以看成动态分类器权重？
 12. CLIP 与能够生成文本的现代 VLM 有什么区别？
 
-## 18. 核心总结
+## 9. 核心总结
 
 CLIP 的训练主链路：
 
