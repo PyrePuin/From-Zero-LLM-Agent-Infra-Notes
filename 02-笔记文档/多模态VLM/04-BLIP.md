@@ -438,22 +438,287 @@ Bootstrapped Dataset
 
 ## 6. 下游任务怎样使用 MED
 
-预训练后的 MED 可以按任务选择相应模式：
+MED 统一的是预训练底座，而不是所有下游任务的输入、输出和推理接口。预训练完成后，不同任务仍要选择相应组件、重新组织数据流，并使用任务数据分别 Fine-tune：
 
-| 下游任务 | 主要使用方式 |
-| --- | --- |
-| Image-Text Retrieval | 先用 ITC 相似度召回候选，再用 ITM 分数重排 |
-| Image Captioning | 使用 Image-grounded Text Decoder 生成描述 |
-| VQA | 先融合图片与问题，再由答案 Decoder 生成答案 |
-| NLVR | 使用融合 Encoder 判断文本与两张图片的关系 |
-| Visual Dialog | 根据图片、Caption 与对话历史判断或生成回答 |
+| 下游任务 | 组件组合 | 微调目标 | 推理输出 |
+| --- | --- | --- | --- |
+| Image-Text Retrieval | Image/Text Encoder + Image-grounded Text Encoder | ITC + ITM | 图文排序分数 |
+| Image Captioning | Image Encoder + Image-grounded Text Decoder | LM | Caption |
+| VQA | Image Encoder + Question Encoder + Answer Decoder | 加权答案 LM | 候选答案或生成答案 |
+| NLVR² | Image Encoder + 双图 Cross-Attention Text Encoder | 二分类损失 | True / False |
+| Visual Dialog | 图片、Caption 与对话 Encoder | ITM 排序损失 | 候选回答排序 |
 
-检索中的两阶段尤其能体现 ITC 与 ITM 的互补：
+> [!important]
+> “Unified Vision-Language Understanding and Generation”主要表示 ITC、ITM、LM 能在一套共享参数的 MED 中联合预训练，并能为多类任务提供初始化。它不表示一个预训练 Checkpoint 无需任务微调，只靠改变 Prompt 就能稳定完成所有任务。
+
+### 6.1 Image-Text Retrieval：ITC 召回，ITM 重排
+
+图文检索需要从大量候选中找出匹配项。若让每个图文组合都执行 Cross-Attention，成本会随候选数量快速增长，因此 BLIP 使用两阶段检索：
 
 ```text
-海量候选
-→ ITC 双塔相似度快速召回少量候选
-→ ITM 对候选进行昂贵但精确的图文融合重排
+第一步：ITC 粗排
+图片与文本分别编码
+→ 预先计算全局向量
+→ 通过点积快速召回 Top-k 候选
+
+第二步：ITM 精排
+只对 Top-k 候选执行图文 Cross-Attention
+→ 计算细粒度匹配分数
+→ 重新排序
+```
+
+微调时继续联合优化 ITC 和 ITM：
+
+```math
+\mathcal{L}_{\mathrm{retrieval}}
+=
+\mathcal{L}_{\mathrm{ITC}}
++
+\mathcal{L}_{\mathrm{ITM}}
+```
+
+论文在 COCO 上取 $`k=256`$，在 Flickr30K 上取 $`k=128`$。ITC 保证大规模召回效率，ITM 则对物体、属性、动作和关系进行更精确的核对。
+
+### 6.2 Image Captioning：使用预训练 Decoder 继续做 LM
+
+图片描述与预训练 LM 支路最接近：
+
+```text
+图片
+→ Image Encoder
+→ 视觉 Token
+→ Image-grounded Text Decoder
+→ 自回归生成 Caption
+```
+
+模型从 BLIP 预训练权重初始化，再使用 COCO Caption 数据和语言建模损失微调：
+
+```math
+\mathcal{L}_{\mathrm{caption}}
+=
+-\sum_{i=1}^{L}
+\log p(w_i\mid I,w_{1:i-1})
+```
+
+论文在 Caption 前加入文本 Prompt `a picture of`，让 Decoder 接着生成图片内容。推理时使用 Beam Search，Beam Size 为 3，最大生成长度为 20。
+
+这项任务不需要新增全新的文本生成器，主要是让预训练 Image-grounded Text Decoder 适应 COCO Caption 的数据分布和描述风格。
+
+### 6.3 VQA：重新组合 Question Encoder 与 Answer Decoder
+
+VQA 输入图片和问题，输出答案。BLIP 不把它当成固定类别分类，而是重新排列预训练组件，将答案建模为文本序列：
+
+```text
+图片
+→ Image Encoder
+→ 图片 Token
+                  ┐
+问题               ↓ Cross-Attention
+→ Question Encoder
+→ 图片—问题融合表示
+                  ↓ Cross-Attention
+→ Answer Decoder
+→ 答案 Token
+```
+
+三个模块都由 BLIP 已有组件初始化：
+
+| VQA 模块 | 预训练来源 |
+| --- | --- |
+| Image Encoder | BLIP 的 ViT Image Encoder |
+| Question Encoder | Image-grounded Text Encoder |
+| Answer Decoder | Image-grounded Text Decoder |
+
+因此 Answer Decoder 不是随机增加并从零训练的新模型。变化主要在数据流：预训练 LM 中 Decoder 直接读取图片；VQA 中 Question Encoder 先融合图片和问题，Answer Decoder 再读取这份融合表示。
+
+#### 6.3.1 图片与问题怎样融合
+
+图片经过 ViT 得到视觉 Token $`H_I`$。问题前加入 `[Encode]` Token，再进入 Question Encoder：
+
+```text
+问题 Token
+→ 双向 Self-Attention 理解完整问题
+→ 作为 Query，通过 Cross-Attention 读取图片 Token
+→ 得到图片—问题融合表示 H_IQ
+```
+
+```math
+H_{IQ}=f_{\mathrm{question}}(Q,H_I)
+```
+
+例如问题是“What is the cat wearing?”，问题语义会引导融合表示保留与猫及其穿戴物有关的视觉内容。
+
+#### 6.3.2 为什么一条问题有多个答案
+
+VQAv2 为同一个问题收集多个人工回答，它们可能不完全一致：
+
+```text
+sunglasses：7 次
+glasses：2 次
+dark glasses：1 次
+```
+
+BLIP 合并相同答案，并用出现频率作为权重：
+
+```math
+w_{bj}
+=
+\frac{\text{答案 }A_{bj}\text{ 的出现次数}}
+{\text{问题 }b\text{ 的答案总数}}
+```
+
+上例会得到：
+
+```text
+sunglasses   → 0.7
+glasses      → 0.2
+dark glasses → 0.1
+```
+
+Question Encoder 对一张图片和一个问题只计算一次，再按不同人工答案数量复制融合表示，让 Answer Decoder 分别计算各答案的序列损失。
+
+#### 6.3.3 Answer Decoder 如何训练
+
+Answer Decoder 使用 Teacher Forcing。例如目标答案是 `dark glasses`：
+
+```text
+输入：[BOS]              → 预测 dark
+输入：[BOS] dark         → 预测 glasses
+输入：[BOS] dark glasses → 预测 [EOS]
+```
+
+对第 $`b`$ 条问题的第 $`j`$ 个答案：
+
+```math
+P(A_{bj}\mid I_b,Q_b)
+=
+\prod_{i=1}^{L_{bj}}
+P(a_{bji}\mid I_b,Q_b,a_{bj,1:i-1})
+```
+
+所有答案按人工频率加权：
+
+```math
+\mathcal{L}_{\mathrm{VQA}}
+=
+-\frac{1}{B}
+\sum_{b=1}^{B}
+\sum_{j=1}^{n_b}
+w_{bj}
+\log P(A_{bj}\mid I_b,Q_b)
+```
+
+这样模型可以接受多个合理表达，同时更重视人工标注中出现频率高的答案。
+
+#### 6.3.4 哪些参数参与微调
+
+官方实现默认把整个 VQA 模型的参数交给 AdamW，因此梯度会更新：
+
+```text
+VQA Loss
+   ↓
+Answer Decoder
+   ↓
+Question Encoder
+   ↓
+Image Encoder
+```
+
+这与 BLIP-2 的冻结策略不同。BLIP-1 的 VQA Fine-tuning 是从预训练权重出发进行任务级端到端微调，而不是只训练一个新答案 Head。
+
+论文的主要 VQA 配置为：
+
+| 配置 | 数值 |
+| --- | ---: |
+| 数据 | VQAv2 Train + Val，并加入 Visual Genome QA |
+| 图片分辨率 | $`480\times480`$ |
+| 初始学习率 | $`2\times10^{-5}`$ |
+| 全局 Batch Size | 256 |
+| Epoch | 10 |
+| 优化器 | AdamW |
+| Weight Decay | 0.05 |
+
+#### 6.3.5 论文中的 VQA 推理不是完全开放生成
+
+官方代码支持 Beam Search 自由生成，但论文报告 VQAv2 结果时，主要让 Decoder 在 3,128 个候选答案中排序：
+
+```math
+A^*
+=
+\arg\max_{A\in\mathcal{C}}
+P(A\mid I,Q)
+```
+
+其中 $`\mathcal{C}`$ 是候选答案集合。为减少计算，实际分两步：
+
+```text
+3,128 个候选答案
+→ 根据第一个答案 Token 的概率粗排
+→ 保留 Top-128
+→ 计算每个候选的完整序列 Log Probability
+→ 选择分数最高的答案
+```
+
+因此，BLIP 将 VQA 建模为生成任务，但论文的最终推理仍借助固定候选答案集合。这也是它不如现代指令 VLM 通用的一处表现。
+
+### 6.4 NLVR²：让文本同时读取两张图片
+
+NLVR² 输入两张图片和一句文本，判断文本是否正确描述这对图片：
+
+```text
+图片 1 ─┐
+        ├→ Image-grounded Text Encoder → MLP → True / False
+图片 2 ─┘
+文本  ────────────────────────────────↑
+```
+
+BLIP 在每个 Image-grounded Text Encoder Block 中配置两套 Cross-Attention，分别读取两张图片。论文前 6 层对两路 Cross-Attention 输出做平均，后 6 层将其拼接后再线性投影。最终取 `[Encode]` 表示，接一个 MLP 二分类器。
+
+这说明 BLIP 的下游迁移不只是更换损失，有时还需要修改 Cross-Attention 的连接方式。
+
+### 6.5 Visual Dialog：对候选回答进行排序
+
+Visual Dialog 不仅依赖当前问题，还要考虑图片、图片 Caption 和历史对话。论文采用判别式设置：
+
+```text
+图片 + Caption
+        ↓
+对话历史 + 当前问题 + 候选回答
+        ↓
+Image-grounded Dialog Encoder
+        ↓
+判断候选回答 True / False
+        ↓
+对所有候选回答排序
+```
+
+这里继续使用类似 ITM 的匹配目标，而不是让 Decoder 完全自由地生成答案。
+
+### 6.6 为什么说 BLIP-1 仍然不够通用
+
+经过 MED 预训练，同一套权重可以为多种任务提供良好初始化，但任务之间仍存在显著差异：
+
+| 需要适配的部分 | 示例 |
+| --- | --- |
+| 模块组合 | VQA 需要 Question Encoder + Answer Decoder |
+| Cross-Attention 连接 | NLVR² 要分别读取两张图片 |
+| 训练目标 | Retrieval 用 ITC/ITM，Caption 用 LM，NLVR² 用二分类 |
+| 数据格式 | VQA 有多个人工答案与权重，Visual Dialog 有历史对话 |
+| 推理算法 | Retrieval 重排、VQA 候选排序、Caption Beam Search |
+
+所以 BLIP-1 的范式是：
+
+```text
+统一视觉语言预训练底座
++ 每个下游任务单独设计 Fine-tuning 与推理流程
+```
+
+而不是后来指令 VLM 更接近的：
+
+```text
+图片 + 任意自然语言指令
+→ 同一个生成接口
+→ 直接输出答案
 ```
 
 ## 7. BLIP 与 CLIP 的关系
