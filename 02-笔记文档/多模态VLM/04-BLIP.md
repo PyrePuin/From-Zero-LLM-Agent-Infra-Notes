@@ -199,6 +199,8 @@ ITC 学到的是：
 
 > 这张图片与这段文字在整体语义上是否相关？
 
+**例如**，一个 Batch 中有“戴墨镜的猫”“水面上的帆船”等图文对。猫图片向量会与所有文本向量计算相似度；交叉熵要求它把正确文本“A cat wearing sunglasses.”的概率提高，并把其他文本的概率压低。
+
 它适合快速检索，但由于图文 Token 没有深度交互，未必能可靠判断细微的属性与关系差异。
 
 ### 3.2 ITM：细粒度图文匹配
@@ -240,6 +242,8 @@ H_{T\leftarrow I}
 ```
 
 BLIP 使用 Hard Negative Mining，优先选择语义相近但实际不匹配的负样本。它们比“猫的图片配飞机描述”更能迫使模型学习物体、属性、动作和关系。
+
+**例如**，训练会把猫图片分别与正样本“A cat wearing sunglasses.”和困难负样本“A cat wearing a hat.”组合。每个组合都让整段文本 Token 通过 Cross-Attention 读取图片 Token，最后由 `[Encode]` 输出一次 Match / Not Match 判断并计算二分类损失。
 
 因此，ITC 与 ITM 的区别可以记成：
 
@@ -289,6 +293,8 @@ p(w_i\mid I,w_{1:i-1})
 -\sum_{i=1}^{L}
 \log p(w_i\mid I,w_{1:i-1})
 ```
+
+**例如**，目标 Caption 是“A cat wearing sunglasses.”。Decoder 先根据图片和起始 Token 预测 `A`，再根据图片与 `A cat wearing` 预测 `sunglasses`。每个位置都与真实下一 Token 计算交叉熵，所有位置的损失相加后更新 Image Encoder 与 MED 中的生成参数。
 
 LM 迫使模型不仅判断图文关系，还要从视觉信息中恢复足以生成自然语言的内容。
 

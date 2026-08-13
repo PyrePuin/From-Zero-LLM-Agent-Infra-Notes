@@ -313,6 +313,8 @@ s(I,T)=\max_k s_k
 
 随后仍像 CLIP 一样进行双向图文对比，让正确图文对靠近、错误图文对远离。
 
+**例如**，对于猫图片和“A cat wearing sunglasses.”，32 个 Query 分别与该文本的 `[CLS]` 向量计算相似度，其中最高分作为这对图文的分数。在 Batch 内，该分数应高于猫图片与其他文本的分数，否则 ITC 交叉熵就会产生惩罚。
+
 ### 4.2 ITM：Query 与文本双向交互
 
 Image-Text Matching 使用 Bi-directional Self-Attention Mask：
@@ -335,6 +337,8 @@ Match / Not Match
 ```
 
 每个 Query 的输出经过二分类头，论文对所有 Query 的匹配 Logit 取平均，得到最终图文匹配分数。训练中还使用 Hard Negative Mining，使模型区分语义接近但事实不一致的图文对。
+
+**例如**，猫图片会与正文本“A cat wearing sunglasses.”和困难负文本“A cat wearing a hat.”分别组成一对输入。对每一对，整段文本与 32 个 Query 先双向交互；32 个 Query 各自产生匹配 Logit，取平均后只得到一次图文 Match / Not Match 判断。因此这不是“一段文本与 32 个 Query 做 32 个独立标注任务”。
 
 ### 4.3 ITG：视觉单向流向文本
 
@@ -364,6 +368,8 @@ p(w_i\mid H_Q,w_{1:i-1})
 ```
 
 ITG 迫使 Query 输出保留足以支持文本生成的视觉内容。
+
+**例如**，目标文本是“A cat wearing sunglasses.”。Query 只能读取图片，不能看到目标文本；文本侧则可以读取 32 个 Query，并根据图片信息与已有前缀依次预测 `A`、`cat`、`wearing` 和 `sunglasses`。各位置的下一 Token 交叉熵会更新 Q-Former 和 Learnable Query。
 
 ### 4.4 为什么三个任务需要不同 Mask
 
