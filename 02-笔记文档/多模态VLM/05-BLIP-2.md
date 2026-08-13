@@ -44,6 +44,10 @@ Q-Former + 线性投影 + 冻结 LLM
 → 教 Q-Former 怎样把视觉信息说成 LLM 能理解的“语言”
 ```
 
+![BLIP-2 的两阶段预训练总览](./assets/blip2-two-stage-overview.png)
+
+> 图源：BLIP-2 原论文 Figure 1。左侧的第一阶段训练 Q-Former 的视觉—语言表示能力；右侧的第二阶段再将其接入冻结 LLM，学习视觉条件文本生成。
+
 ## 1. BLIP-2 想解决什么问题
 
 现代视觉模型和语言模型不断扩大。如果从头端到端训练整个视觉语言模型：
@@ -197,7 +201,41 @@ N_v 个视觉 Token
 
 因此，Q-Former 既是跨模态连接器，也是固定大小的信息瓶颈。
 
-### 3.3 Query 会固定负责某个物体吗
+### 3.3 为什么 Query 要先经过 Self-Attention
+
+32 个 Query 不是彼此隔离的 32 个探针，而是一组需要协同提取信息的视觉槽位。在 Q-Former Block 中，Query 先通过 Self-Attention 交换状态，再由部分 Block 中的 Cross-Attention 读取图片 Token：
+
+```text
+32 个 Learnable Query
+→ Self-Attention：Query 之间交流和协调
+→ Cross-Attention：从图片 Token 中读取信息
+→ 后续 Self-Attention：交换各自已读取的图像信息
+→ 后续 Cross-Attention：带着上下文继续查询图片
+```
+
+Self-Attention 对 Query 状态的更新可以概括为：
+
+```math
+\widetilde{H}_Q
+=
+\mathrm{softmax}
+\left(
+\frac{H_QW_Q(H_QW_K)^{\mathsf{T}}}{\sqrt{d}}
+\right)
+H_QW_V
+```
+
+它主要解决三个问题：
+
+1. **协调关注内容**：一个 Query 可以根据其他 Query 的状态调整自己的查询，减少大量 Query 重复关注同一区域。
+2. **组合局部信息**：不同 Query 可能分别读到“猫”“眼镜”和“戴着”，Self-Attention 让它们进一步形成“猫戴着眼镜”这种关系表示。
+3. **支持多轮查询**：经过一次 Cross-Attention 后，Query 已经携带与当前图片有关的信息。下一层 Self-Attention 先汇总这些信息，再进行下一轮视觉查询。
+
+第一次 Cross-Attention 之前，Self-Attention 交流的只是 32 个可学习参数的初始状态；从第一次 Cross-Attention 之后开始，后续 Self-Attention 交流的就是已经被图片条件化的 Query 表示。因此可以把两种注意力的分工记成：
+
+> Cross-Attention 负责“看图片”，Self-Attention 负责“交流看到了什么，并决定接下来怎样查询”。
+
+### 3.4 Query 会固定负责某个物体吗
 
 不能机械理解为：
 
@@ -210,6 +248,18 @@ Query 3 永远负责背景
 论文没有给每个 Query 指定固定职责。每个 Query 只是一个可学习的信息槽位，它在具体图片中关注什么，由视觉内容、其他 Query、文本和训练目标共同决定。
 
 结构提供了读取视觉 Token 的通道；ITC、ITM 和 ITG 的损失则迫使这些 Query 逐渐提取对语言任务有用的信息。
+
+### 3.5 文本是不是也被压缩成一个向量
+
+这取决于训练任务，不能统一理解为“文本总会经过注意力得到一个向量”：
+
+| 任务 | 文本如何表示 | 如何与图片交互 |
+| --- | --- | --- |
+| ITC | 取文本 `[CLS]` 输出作为全局向量 | 与 32 个 Query 输出分别计算相似度，再取最大值 |
+| ITM | 保留文本 Token 序列 | Query 与 Text 通过双向 Self-Attention 深度融合 |
+| ITG | 保留文本 Token 序列 | Text 读取 Query，并按因果顺序逐 Token 生成 |
+
+所以，图片侧始终用 32 个 Query 形成固定长度的视觉表示；文本侧则根据 ITC、ITM 或 ITG 的需要，使用一个全局向量或完整 Token 序列。
 
 ## 4. 第一阶段：视觉—语言表示学习
 
@@ -349,6 +399,10 @@ ITG：视觉单向流向文本
 → 冻结 LLM
 → 生成文本
 ```
+
+![BLIP-2 连接 Decoder-only 与 Encoder-Decoder LLM 的方式](./assets/blip2-llm-connection.png)
+
+> 图源：BLIP-2 原论文 Figure 3。上半部是 Decoder-only OPT，视觉 Prompt 直接作为生成序列的前缀；下半部是 Encoder-Decoder Flan-T5，视觉 Prompt 与文本前缀进入 Encoder，Decoder 负责生成后续文本。
 
 ### 5.1 为什么还要一个全连接层
 
@@ -595,10 +649,11 @@ ITC + ITM + ITG
 → 怎样让冻结 LLM 理解提取出来的视觉信息？
 ```
 
-最终需要记住五点：
+最终需要记住六点：
 
 1. Learnable Query 是模型参数，不是文本问题或固定物体检测槽位。
-2. Cross-Attention 让少量 Query 从大量视觉 Token 中主动提取信息。
-3. ITC、ITM、ITG 使用不同 Mask，分别实现隔离比较、双向融合和单向生成。
-4. Q-Former 输出经线性投影后成为没有词表 ID 的 Soft Visual Prompt。
-5. BLIP-2 把跨模态适应压力放在连接器上，因此预训练时 Image Encoder 和 LLM 都可以保持冻结。
+2. Self-Attention 让 Query 协调关注内容、交换已读取的视觉信息，Cross-Attention 则让 Query 从大量视觉 Token 中主动提取信息。
+3. 文本侧不总是压缩成单一向量：ITC 使用 `[CLS]` 全局表示，ITM 和 ITG 则保留文本 Token 序列。
+4. 第一阶段通过 ITC、ITM 和 ITG 训练 Q-Former 的图文对齐、匹配和生成能力。
+5. 第二阶段将 Q-Former 输出投影成 Soft Visual Prompt，让冻结 LLM 根据图片生成文本。
+6. BLIP-2 把跨模态适应压力放在连接器上，因此预训练时 Image Encoder 和 LLM 都可以保持冻结。
