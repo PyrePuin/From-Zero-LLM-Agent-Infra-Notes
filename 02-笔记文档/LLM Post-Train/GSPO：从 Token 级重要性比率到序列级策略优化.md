@@ -14,8 +14,6 @@ tags: [LLM, Post-Training, Reinforcement-Learning, RLVR, GSPO, GRPO, Qwen3, MoE]
 >
 > - 论文：[Group Sequence Policy Optimization](https://arxiv.org/abs/2507.18071)
 > - 官方解读：[GSPO: Towards Scalable Reinforcement Learning for Language Models](https://qwenlm.github.io/blog/gspo/)
-> - 实现锚点：[verl `compute_policy_loss_gspo`](https://verl.readthedocs.io/en/latest/_modules/verl/trainer/ppo/core_algos.html#compute_policy_loss_gspo)
-> - 训练示例：[verl Qwen3-8B GSPO](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_8b_fsdp.sh)
 > - 写作框架参考：[DAPO：从 GRPO 到稳定的长链推理强化学习](https://www.xiaohongshu.com/explore/69e4de63000000001a028d2c)
 
 > [!note]
@@ -41,11 +39,10 @@ GSPO
   序列级 Ratio / Clipping
 ```
 
-GSPO 主要想解决三类问题：
+GSPO 主要想解决两类相互关联的问题：
 
 1. 长序列中 Token 级重要性比率带来的高方差和噪声积累；
-2. MoE 模型专家路由变化导致单 Token Log Probability 大幅波动；
-3. Rollout 引擎与训练引擎之间的数值误差，使 Token 级 Ratio 不可靠。
+2. MoE 模型专家路由变化导致单 Token Log Probability 大幅波动。
 
 ## 1. GSPO 的定位
 
@@ -68,6 +65,45 @@ GSPO 全称为 Group Sequence Policy Optimization，由 Qwen 团队提出，并�
 
 > [!important]
 > GSPO 不是新的 Reward Estimator。它仍然使用 GRPO 的 Group-Relative Advantage；创新集中在 Importance Ratio、Clipping 和梯度权重的粒度。
+
+### 1.1 全文核心符号
+
+后文会反复在“Prompt、回答、Token、概率、目标函数和梯度”几个层次之间切换。先统一符号，后面每次推导只补充当时新增的含义。
+
+| 符号 | 含义 |
+| --- | --- |
+| $`x`$ | 输入 Prompt；推导单个 Prompt 时通常把它视为已知条件 |
+| $`G`$ | 同一个 Prompt 采样的回答数量，也叫 Group Size |
+| $`i`$ | 回答编号，取值为 1、2、…、$`G`$ |
+| $`y_i`$ | 第 $`i`$ 条完整回答 |
+| $`T_i`$ | 第 $`i`$ 条回答的有效 Token 数，不包含 Padding |
+| $`t`$ | 回答内部的 Token 位置，取值为 1、2、…、$`T_i`$ |
+| $`y_{i,t}`$ | 第 $`i`$ 条回答的第 $`t`$ 个 Token |
+| $`y_{i,1:t-1}`$ | 第 $`t`$ 个 Token 之前已经生成的前缀 |
+| $`\theta`$ | 正在更新的 Current Policy 参数 |
+| $`\theta_{\mathrm{old}}`$ | 生成当前 Rollout Batch 时使用的 Old Policy 参数；在这批更新中固定不变 |
+| $`\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})`$ | Current Policy 在给定 Prompt 和前缀后生成已采样 Token 的条件概率 |
+| $`r_i`$ | Verifier 对第 $`i`$ 条完整回答给出的序列级 Reward |
+| $`\widehat A_i`$ | 第 $`i`$ 条回答相对同组其他回答的 Advantage |
+| $`w_{i,t}`$ | 第 $`i`$ 条回答、第 $`t`$ 个 Token 的新旧策略概率比 |
+| $`\rho_i`$ | 未做长度归一化的完整序列概率比，等于所有 $`w_{i,t}`$ 的连乘 |
+| $`s_i`$ | GSPO 使用的长度归一化序列 Ratio，等于所有 $`w_{i,t}`$ 的几何平均 |
+| $`\varepsilon_{\mathrm{low}},\varepsilon_{\mathrm{high}}`$ | Ratio 允许向下、向上偏离 1 的裁剪范围 |
+| $`J(\theta)`$ | 希望最大化的策略目标；越大越好 |
+| $`L(\theta)`$ | 训练代码最小化的 Loss，通常取 $`L=-J`$ |
+| $`\mathbb E`$ | 对随机采样到的 Prompt 或回答取期望；代码中用 Batch 平均近似 |
+| $`\nabla_\theta`$ | 对全部参数 $`\theta`$ 求梯度，结果是“怎样改变参数能最快增大目标”的向量 |
+| $`\mathrm{sg}[z]`$ | Stop Gradient：前向数值仍是 $`z`$，反向传播时把它当常数 |
+| $`\sum`$ 与 $`\prod`$ | 分别表示求和与连乘 |
+| $`\log`$ 与 $`\exp`$ | 分别表示自然对数与指数函数；两者互为逆运算 |
+| $`\mathrm{clip}(z,a,b)`$ | 把 $`z`$ 限制在区间 $`[a,b]`$ 内 |
+| $`\min(a,b)`$ | 取 $`a`$、$`b`$ 中较小的值 |
+| $`\sim`$ | “从某个概率分布中采样” |
+| $`\mid`$ | 条件概率中的“在……条件下” |
+| $`\propto`$ | “成比例”；表示省略了不影响当前比较的公共系数 |
+
+> [!note]
+> 同一个字母的下标表示它属于哪个层次：$`i`$ 区分回答，$`t`$ 区分回答内部的 Token。没有 $`t`$ 下标的 $`r_i`$、$`\widehat A_i`$、$`\rho_i`$ 和 $`s_i`$ 都是整条回答共享的量。
 
 ## 2. 从重复使用 Rollout 到 Importance Sampling
 
@@ -320,7 +356,7 @@ y=(y_1,y_2,\ldots,y_T)
 
 $`T`$ 可以由 EOS 决定，也可以受到最大生成长度限制。不同回答可能具有不同长度。
 
-如果回答以 EOS 正常结束，EOS 也应视为这条生成路径的一部分；遗漏 EOS 概率，相当于计算“生成此前缀”的概率，而不是“恰好在这里结束的完整回答”的概率。实际实现是否显式把 EOS 放进 Response Mask，需要与框架的 Logprob 定义保持一致。
+如果回答以 EOS 正常结束，EOS 也应视为这条生成路径的一部分；遗漏 EOS 概率，相当于计算“生成此前缀”的概率，而不是“恰好在这里结束的完整回答”的概率。比较新旧策略时，两边必须使用同一个序列边界定义。
 
 自回归生成可以想象成在一棵生成树上行走：
 
@@ -589,7 +625,13 @@ r_i-\mathrm{mean}(r_1,\ldots,r_G)
 }
 ```
 
-$`\epsilon_A`$ 是防止分母为 0 的数值稳定项。
+这条公式分成三步：
+
+1. $`\mathrm{mean}(r_1,\ldots,r_G)`$ 计算同一 Prompt 下 $`G`$ 条回答的平均 Reward；
+2. $`r_i-\mathrm{mean}(\cdot)`$ 判断第 $`i`$ 条回答比组内平均更好还是更差；
+3. 再除以组内标准差 $`\mathrm{std}(\cdot)`$，使不同 Prompt 下 Advantage 的数值尺度更接近。
+
+$`\epsilon_A`$ 是一个很小的正常数，只用于防止所有 Reward 相同时分母为 0。最终 $`\widehat A_i>0`$ 表示回答优于组内平均，$`\widehat A_i<0`$ 表示回答劣于组内平均。
 
 同一回答中的 Token 通常共享同一个 $`\widehat A_i`$：
 
@@ -620,6 +662,16 @@ w_{i,t}(\theta)\widehat A_i,
 \right]
 ```
 
+从内向外读这条公式：
+
+- 对每个 Token，比较“原始代理项” $`w_{i,t}\widehat A_i`$ 与“裁剪后的代理项” $`\mathrm{clip}(w_{i,t},1-\varepsilon,1+\varepsilon)\widehat A_i`$；
+- $`\min`$ 选择更保守的那个值，防止策略通过让 Ratio 过度偏离 1 持续提高目标；
+- $`\sum_t/T_i`$ 先在一条回答内部对 Token 求平均；
+- $`\sum_i/G`$ 再对同一个 Prompt 的 $`G`$ 条回答求平均；
+- 最外层 $`\mathbb E`$ 表示还要对训练中采到的不同 Prompt 和 Rollout Batch 取平均。
+
+$`J_{\mathrm{GRPO}}`$ 是要最大化的目标。训练框架如果采用梯度下降，实际最小化的是 $`L_{\mathrm{GRPO}}=-J_{\mathrm{GRPO}}`$，两种写法描述的是同一更新方向。
+
 这里出现了 GSPO 论文认为不协调的地方：
 
 | 信号 | 粒度 |
@@ -640,27 +692,146 @@ GSPO 论文认为，这使 Token Ratio 很难发挥传统 Importance Sampling �
 > [!warning]
 > 更严谨地说，Importance Sampling 并非原则上不能用于自回归轨迹；轨迹级 IS、Per-Decision IS 都有严格定义。GSPO 批评的是：**共享一个序列 Advantage，却把每个 Token 的单样本条件概率比当作独立权重的 GRPO 目标，不等同于标准的完整轨迹校正。**
 
-### 5.2 长序列会积累更多噪声
+### 5.2 从 GRPO 目标到梯度：Token Ratio 怎样影响参数更新
 
-GRPO 的梯度中，不同 Token 使用不同权重：
+第 4.2 节写的是 GRPO 的目标函数，但只看目标值还不能回答一个关键问题：**回答中的每个 Token 最终以多大力度修改模型参数？**
+
+优化器并不直接拿目标函数的数值更新模型，而是先计算它对参数的梯度。因此，这里引入梯度不是突然换到另一个分析角度，而是在继续追问第 4.2 节的 Loss 会产生什么实际更新。
+
+#### 5.2.1 先看没有触发裁剪的一条回答
+
+暂时忽略 Batch 平均和 Clipping。第 $`i`$ 条回答对应的未裁剪 GRPO 目标是：
 
 ```math
-\nabla_\theta J_{\mathrm{GRPO}}
-\propto
-\widehat A_i
-\frac{1}{T_i}
-\sum_{t=1}^{T_i}
-w_{i,t}(\theta)
-\nabla_\theta\log\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
+J_i^{\mathrm{GRPO}}(\theta)
+=
+\frac{\widehat A_i}{T_i}
+\sum_{t=1}^{T_i}w_{i,t}(\theta)
 ```
 
-长回答包含更多随机波动的 $`w_{i,t}`$。即使每个 Ratio 单独看并不极端，不均匀权重也会在大量 Token 上持续改变梯度方向与大小。
+这条公式中的每一部分分别表示：
 
-### 5.3 序列奖励与 Token 裁剪并不完全对齐
+- $`J_i^{\mathrm{GRPO}}`$：第 $`i`$ 条回答对“要最大化的策略目标”的贡献；
+- $`\widehat A_i`$：整条回答相对同组回答更好还是更差；
+- $`1/T_i`$：先对这条回答的有效 Token 求平均，避免仅因回答更长就获得更大权重；
+- $`w_{i,t}`$：第 $`t`$ 个 Token 在 Current Policy 与 Old Policy 下的概率比。
 
-对于正 Advantage 的回答，一些 Token 可能未被裁剪，另一些 Token 可能超过上界而被裁剪。同一回答因此被拆成不同更新强度的 Token 集合。
+Token Ratio 的定义是：
 
-但序列级 Reward 只告诉模型“整条回答相对更好或更差”，并没有提供哪个 Token 应该承担更多 Credit 的信息。单纯依靠 Token Ratio 形成不同权重，不等于获得了可靠的 Token-Level Credit Assignment。
+```math
+w_{i,t}(\theta)
+=
+\frac{
+\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
+}{
+\pi_{\theta_{\mathrm{old}}}(y_{i,t}\mid x,y_{i,1:t-1})
+}
+```
+
+旧策略在当前 Batch 中固定不变，因此分母对 $`\theta`$ 的梯度为 0。先对 Ratio 直接求导：
+
+```math
+\nabla_\theta w_{i,t}(\theta)
+=
+\frac{1}{
+\pi_{\theta_{\mathrm{old}}}(y_{i,t}\mid x,y_{i,1:t-1})
+}
+\nabla_\theta
+\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
+```
+
+再利用恒等式 $`\nabla_\theta p_\theta=p_\theta\nabla_\theta\log p_\theta`$，可以得到：
+
+```math
+\nabla_\theta w_{i,t}(\theta)
+=
+w_{i,t}(\theta)
+\nabla_\theta
+\log\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
+```
+
+这里的 $`\nabla_\theta\log\pi_\theta`$ 常被称为 Score Function。它不是新的概率，而是一个与模型参数同维度的向量，表示“怎样改变参数，能最快提高这个已采样 Token 的 Log Probability”。
+
+#### 5.2.2 代回目标函数以后，每个 Token 怎样影响梯度
+
+对未裁剪目标求梯度：
+
+```math
+\nabla_\theta J_i^{\mathrm{GRPO}}(\theta)
+=
+\frac{\widehat A_i}{T_i}
+\sum_{t=1}^{T_i}
+w_{i,t}(\theta)
+\nabla_\theta
+\log\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
+```
+
+不要把这条公式只看成一串符号。它是在说：整条回答产生的参数更新，是所有 Token 更新方向的加权和。
+
+对第 $`t`$ 个 Token 来说：
+
+```text
+Token 的更新贡献
+= 整条回答好坏 A_i
+× 长度归一化 1/T_i
+× 自己的新旧概率比 w_i,t
+× 提高自己 Log Probability 的方向
+```
+
+其中：
+
+- $`\widehat A_i>0`$ 时，整体方向倾向于提高这条回答中已采样 Token 的概率；
+- $`\widehat A_i<0`$ 时，整体方向反转，倾向于降低这些 Token 的概率；
+- $`w_{i,t}`$ 决定第 $`t`$ 个 Token 的方向在总梯度中被放大还是缩小；
+- $`\nabla_\theta\log\pi_\theta`$ 决定这个 Token 具体推动哪些参数、朝哪个方向变化。
+
+因此，即使同一回答中的所有 Token 共享同一个 $`\widehat A_i`$，它们仍可能因为 $`w_{i,t}`$ 不同而获得不同的更新强度。
+
+#### 5.2.3 为什么长序列更容易暴露这个问题
+
+假设一条正 Advantage 回答中，四个 Token Ratio 分别是：
+
+```math
+(0.7,1.0,1.1,1.5)
+```
+
+虽然 Verifier 只说“整条回答较好”，GRPO 却会分别用 0.7、1.0、1.1、1.5 缩放四个 Token 的梯度方向。第四个 Token 的更新权重超过第一个 Token 两倍，但这个差异来自新旧策略概率变化，并不等于 Verifier 认为第四个 Token 对正确答案更重要。
+
+序列变长后，更容易出现至少一个异常 Ratio 或越过裁剪边界的 Token。这里也不能简单认为不同 Token 的噪声一定会通过求平均互相抵消，因为：
+
+1. 不同 Token 的 $`\nabla_\theta\log\pi_\theta`$ 是方向不同的向量，不是同一个标量；
+2. Token Ratio 的波动不一定独立，也不一定以 1 为中心对称；
+3. 一旦某些 Token 触发 Clipping，它们与未裁剪 Token 遵循不同的梯度规则。
+
+所以更准确的说法不是“Token 数越多，梯度方差必然线性增加”，而是：**长序列提供了更多 Ratio 波动和局部裁剪机会，使同一个序列 Advantage 被拆成越来越不一致的 Token 更新。**
+
+### 5.3 Token 裁剪怎样进一步拆散同一条回答
+
+第 5.2 节暂时忽略了 Clipping。现在把它放回来。GRPO 对每个 Token 都单独比较：
+
+```math
+w_{i,t}\widehat A_i
+```
+
+与：
+
+```math
+\mathrm{clip}(w_{i,t},1-\varepsilon,1+\varepsilon)\widehat A_i
+```
+
+再由 $`\min`$ 选择更保守的分支。假设 $`\varepsilon=0.2`$，允许的 Token Ratio 区间就是 $`[0.8,1.2]`$。
+
+对于正 Advantage 回答，Ratio 为 1.5 的 Token 已经把概率提高得过多，裁剪分支只按 1.2 计算；当目标落在这个平坦的裁剪分支上时，继续增大该 Token 的 Ratio 不再带来收益。与此同时，同一回答中 Ratio 为 1.0 或 1.1 的 Token 仍可以继续更新。
+
+对于负 Advantage 回答，逻辑方向相反：Ratio 低于 0.8 表示这个 Token 的概率已经降得足够多，裁剪阻止它继续从过度下降中获得目标收益；Ratio 仍在区间内的其他 Token 则继续更新。
+
+因此，一条回答虽然只有一个序列 Advantage，进入梯度时却可能被分成三类 Token：
+
+1. 未越界、继续正常更新的 Token；
+2. Ratio 不同、因而更新强度不同的 Token；
+3. 已落入裁剪平坦区、当前不再提供对应方向梯度的 Token。
+
+但序列级 Reward 只告诉模型“整条回答相对更好或更差”，并没有提供哪个 Token 应该承担更多 Credit 的信息。单纯依靠 Token Ratio 和独立裁剪形成不同权重，不等于获得了可靠的 Token-Level Credit Assignment。这正是 GSPO 要把 Ratio 与 Clipping 统一到回答级别的直接原因。
 
 ## 6. GSPO 的序列级 Importance Ratio
 
@@ -699,6 +870,14 @@ s_i(\theta)
 ```
 
 所以 $`s_i`$ 是整条回答所有 Token Ratio 的几何平均。
+
+这里：
+
+- $`\pi_\theta(y_i\mid x)`$ 是 Current Policy 生成完整回答 $`y_i`$ 的序列概率；
+- $`\pi_{\theta_{\mathrm{old}}}(y_i\mid x)`$ 是 Old Policy 对同一回答的序列概率；
+- 两者的比值 $`\rho_i`$ 是原始序列 Ratio；
+- 指数 $`1/T_i`$ 把原始序列 Ratio 平均到每个有效 Token 的尺度；
+- 得到的 $`s_i`$ 仍然属于整条回答，而不是第 $`t`$ 个 Token。
 
 在 Log 空间计算更清楚：
 
@@ -770,6 +949,16 @@ s_i(\theta)\widehat A_i,
 \right]
 ```
 
+这条公式与 GRPO 目标的外层结构相似，但内部不再对 Token Ratio 分别取 $`\min`$。逐层看：
+
+- $`s_i\widehat A_i`$ 是第 $`i`$ 条回答未经裁剪的代理收益；
+- $`\mathrm{clip}(s_i,1-\varepsilon_{\mathrm{low}},1+\varepsilon_{\mathrm{high}})`$ 把整条回答的 Ratio 限制在允许区间；
+- $`\min`$ 选择原始分支和裁剪分支中更保守的值；
+- $`1/G\sum_i`$ 对同一 Prompt 的回答求平均；
+- $`\mathbb E`$ 再对训练中采样的 Prompt 与回答组取期望。
+
+最重要的变化是：公式内部只有回答下标 $`i`$，没有 Token 下标 $`t`$。这说明 Ratio 与裁剪决策都以完整回答为单位。
+
 训练代码通常最小化相反数：
 
 ```math
@@ -811,11 +1000,13 @@ s_i(\theta)<1-\varepsilon_{\mathrm{low}}
 这远小于 PPO/GRPO 中常见的 0.1 或 0.2，因为 GSPO 裁剪的是“平均到每个 Token 后的序列几何平均 Ratio”，它与 Token Ratio 的数值尺度不同。
 
 > [!warning]
-> 这个范围来自论文特定模型和训练设置，不应机械迁移到所有模型。只要 Ratio 定义、Loss Reduction、Rollout Batch Freshness 或训练框架不同，就需要重新观察 $`s_i`$ 分布与 Clip Fraction。
+> 这个范围来自论文特定模型和训练设置，不应机械迁移到所有模型。只要 Ratio 定义、回答长度分布或新旧策略偏移程度不同，就需要重新观察 $`s_i`$ 分布与 Clip Fraction。
 
 ## 8. GSPO 的梯度为什么仍然落在 Token 上
 
-先忽略 Clipping。单条回答的目标为：
+第 7 节的目标已经没有 Token 下标，容易产生一个疑问：模型明明逐 Token 输出概率，序列级目标怎样把梯度传回 Transformer？这一节只回答这个问题。
+
+先忽略 Clipping，并固定一条没有触发裁剪的回答。它的目标为：
 
 ```math
 J_i(\theta)=s_i(\theta)\widehat A_i
@@ -829,6 +1020,8 @@ J_i(\theta)=s_i(\theta)\widehat A_i
 s_i(\theta)\widehat A_i
 \nabla_\theta\log s_i(\theta)
 ```
+
+这里使用了恒等式 $`\nabla_\theta s_i=s_i\nabla_\theta\log s_i`$。$`\widehat A_i`$ 来自已经完成的 Rollout 与 Reward 计算，在当前 Policy 更新中当作常数，因此不对它求导。
 
 而：
 
@@ -855,6 +1048,8 @@ s_i(\theta)\widehat A_i
 \log\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
 ```
 
+这一步表示：Old Policy 的 Log Probability 在求导时消失，Current Policy 的序列 Log Probability 则按照自回归分解，变成所有 Token Log Probability 梯度的平均。
+
 代回得到：
 
 ```math
@@ -872,6 +1067,8 @@ s_i(\theta)\widehat A_i
 - 序列级权重是 $`s_i\widehat A_i`$；
 - 每个 Token 都通过自己的 $`\nabla\log\pi_\theta`$ 参与更新；
 - 同一回答内的 Token 不再乘不同的 Token Ratio。
+
+换句话说，“序列级”描述的是**如何计算并共享梯度前面的标量权重**，不是说模型突然拥有了一个不经过 Token 的序列输出头。
 
 GRPO 则近似为：
 
@@ -893,7 +1090,66 @@ GRPO：每个 Token 的梯度 × 自己的 w_i,t
 GSPO：每个 Token 的梯度 × 同一个 s_i
 ```
 
-## 9. GSPO-token：需要 Token Advantage 时怎么办
+## 9. 为什么 GSPO 对 MoE 更稳定
+
+到这里已经完整定义了 GSPO，接下来再看它为什么特别适合 MoE。MoE 不是推出 GSPO 公式的前提，而是一个会显著放大 Token Ratio 波动的模型结构。
+
+### 9.1 MoE 为什么会放大单 Token Log Probability 波动
+
+MoE 模型在每一层通常包含一个 Router 和多个 Expert。对于同一个 Token，Router 只选择少数 Expert 参与计算：
+
+```text
+Token Hidden State
+        ↓
+      Router
+        ↓
+选择少数 Expert → 合并 Expert 输出 → 计算下一个 Token 概率
+```
+
+策略参数更新以后，即使输入 Prompt、前缀和目标 Token 完全相同，Router 的打分也可能发生变化，使 Current Policy 与 Old Policy 选择不同的 Expert。由于后续计算经过了不同子网络，该 Token 的概率可能产生比 Dense 模型更明显的跳变。
+
+论文在一个 48 层 Qwen3-30B-A3B-Base 模型上观察到：对同一个 Rollout 样本执行更新后，新旧策略激活的 Expert 约有 10% 不同。这里真正影响策略优化的因果链是：
+
+```text
+Router 选择变化
+→ Token 经过不同 Expert
+→ Token Log Probability 变化
+→ Token Ratio w_i,t 波动
+→ GRPO 中该 Token 的梯度权重和裁剪状态变化
+```
+
+### 9.2 GRPO 与 GSPO 怎样处理同一组波动
+
+GRPO 为每个 Token 单独使用：
+
+```math
+w_{i,t}
+=
+\frac{\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})}
+{\pi_{\theta_{\mathrm{old}}}(y_{i,t}\mid x,y_{i,1:t-1})}
+```
+
+如果某个 Token 因路由变化得到异常 $`w_{i,t}`$，这个异常值会直接缩放该 Token 的梯度，还可能独立触发 Clipping。
+
+GSPO 先计算整条回答的平均 Log-Ratio：
+
+```math
+\log s_i
+=
+\frac{1}{T_i}
+\sum_{t=1}^{T_i}\log w_{i,t}
+```
+
+然后整条回答共享 $`s_i`$。如果路由变化只让少量 Token 的 Log-Ratio 出现正负波动，序列平均会降低单个异常 Token 对最终权重的控制力；裁剪判断也从每个 Token 一次变成每条回答一次。
+
+这就是 GSPO 对 MoE 更稳定的算法原因：**它没有消除 Router 波动，而是改变了波动进入 Policy Gradient 的聚合方式。**
+
+> [!warning]
+> 序列平均只能缓和局部、方向不完全一致的波动。如果大量 Token 的 Log Probability 都发生同方向系统性偏移，$`s_i`$ 仍然会明显偏离 1，不能把 GSPO 理解成自动修复 MoE 路由不一致。
+
+论文实验中，GSPO 在不使用 Routing Replay 的情况下也能稳定训练 MoE。Routing Replay 会强制 Current Policy 重用 Old Policy 的 Expert 路由；GSPO 的结果说明，通过序列级聚合降低局部 Ratio 敏感性，也可以成为另一条稳定化路径。
+
+## 10. GSPO-token：需要 Token Advantage 时怎么办
 
 标准 GSPO 假设同一回答中所有 Token 共用 $`\widehat A_i`$。在多轮 Agent、过程奖励或局部工具调用场景中，可能希望使用 $`\widehat A_{i,t}`$。
 
@@ -911,6 +1167,8 @@ s_{i,t}(\theta)
 ```
 
 $`\mathrm{sg}`$ 表示 Stop Gradient。
+
+这里新增的 $`s_{i,t}`$ 是分配给第 $`i`$ 条回答中第 $`t`$ 个 Token 的代理权重；$`\widehat A_{i,t}`$ 则允许不同 Token 使用不同 Advantage。Stop Gradient 用来人为指定哪些因子只参与前向数值、哪些因子承担反向梯度。
 
 第二个分数的前向数值恒为 1，因此：
 
@@ -931,202 +1189,30 @@ s_{i,t}(\theta)=s_i(\theta)
 
 GSPO-token 与标准 GSPO 在目标数值、裁剪条件和理论梯度上等价。
 
-## 10. 一次完整训练链路
+## 11. 一次完整训练链路
 
 ```mermaid
 flowchart TD
     DATA["从数据集采样 Prompt x"] --> ROLLOUT["旧策略生成 G 条回答"]
     ROLLOUT --> REWARD["Verifier / Reward Model 为整条回答打分"]
     REWARD --> ADV["组内标准化得到序列 Advantage"]
-    ROLLOUT --> OLD["保存或重算 old_log_prob"]
-    ROLLOUT --> NEW["当前策略计算 log_prob"]
-    OLD --> DELTA["逐 Token 计算 log-ratio"]
+    ROLLOUT --> OLD["旧策略计算已采样 Token 的条件概率"]
+    ROLLOUT --> NEW["当前策略计算同一批 Token 的条件概率"]
+    OLD --> DELTA["逐 Token 计算新旧 Log-Ratio"]
     NEW --> DELTA
-    DELTA --> MASK["按 response_mask 求序列平均 log-ratio"]
-    MASK --> RATIO["exp 得到序列 Ratio s_i"]
+    DELTA --> MEAN["在每条回答内求平均 Log-Ratio"]
+    MEAN --> RATIO["取指数得到序列 Ratio s_i"]
     ADV --> CLIP["序列级 Clipped Objective"]
     RATIO --> CLIP
-    CLIP --> REDUCE["每条序列 Token Mean，再跨序列 Mean"]
+    CLIP --> REDUCE["对回答组与训练样本取平均"]
     REDUCE --> UPDATE["反向传播并更新 Policy"]
     UPDATE --> REFRESH["周期性刷新旧策略与 Rollout"]
     REFRESH --> ROLLOUT
 ```
 
-对应伪代码：
+这条链路只强调算法中的随机变量和变换关系：旧策略负责采样，Verifier 产生序列 Reward，组内比较产生 Advantage，新旧概率产生序列 Ratio，最后由裁剪目标决定参数更新。具体张量布局和训练框架不属于本文范围。
 
-```python
-for prompts in dataloader:
-    responses = old_policy.generate(prompts, n=group_size)
-    rewards = verifier(prompts, responses)
-    advantages = normalize_within_prompt_group(rewards)
-
-    old_log_prob = score(old_policy, prompts, responses)
-
-    for mini_batch in split(responses):
-        log_prob = score(policy, prompts, mini_batch)
-        log_ratio = log_prob - old_log_prob
-
-        seq_len = response_mask.sum(dim=-1).clamp(min=1)
-        seq_log_ratio = (
-            (log_ratio * response_mask).sum(dim=-1) / seq_len
-        )
-        seq_ratio = seq_log_ratio.exp()
-
-        objective_1 = seq_ratio * advantages
-        objective_2 = seq_ratio.clamp(
-            1 - eps_low,
-            1 + eps_high,
-        ) * advantages
-
-        loss = -minimum(objective_1, objective_2).mean()
-        loss.backward()
-        optimizer.step()
-```
-
-实际实现还需要处理 Padding Mask、分布式全局 Batch Reduction、梯度累积和数值裁剪。
-
-## 11. verl 实现怎样对应公式
-
-verl 的核心输入张量为：
-
-| 张量 | 典型形状 | 含义 |
-| --- | --- | --- |
-| `old_log_prob` | `(batch_size, response_length)` | 旧策略对已采样 Token 的 Log Probability |
-| `log_prob` | `(batch_size, response_length)` | 当前策略对同一批 Token 的 Log Probability |
-| `advantages` | `(batch_size, response_length)` | 序列 Advantage 广播到 Token，或 Token Advantage |
-| `response_mask` | `(batch_size, response_length)` | 有效回答 Token 为 1，Padding 为 0 |
-
-### 11.1 序列平均 Log-Ratio
-
-代码首先计算：
-
-```python
-negative_approx_kl = log_prob - old_log_prob
-seq_lengths = response_mask.sum(dim=-1).clamp(min=1)
-negative_approx_kl_seq = (
-    (negative_approx_kl * response_mask).sum(dim=-1)
-    / seq_lengths
-)
-```
-
-这里的 `negative_approx_kl_seq` 对应：
-
-```math
-\log s_i(\theta)
-=
-\frac{1}{T_i}\sum_t\delta_{i,t}
-```
-
-### 11.2 Stop-Gradient 技巧
-
-verl 没有直接把一个标量 `seq_ratio` 乘到最终标量 Loss，而是构造：
-
-```python
-log_seq_importance_ratio = (
-    log_prob
-    - log_prob.detach()
-    + negative_approx_kl_seq.detach().unsqueeze(-1)
-)
-seq_importance_ratio = log_seq_importance_ratio.exp()
-```
-
-前向计算时：
-
-```math
-\log\pi_\theta-\mathrm{sg}[\log\pi_\theta]=0
-```
-
-所以每个 Token 得到的数值都是同一个：
-
-```math
-\exp(\mathrm{sg}[\log s_i])=s_i
-```
-
-反向传播时，`log_prob - log_prob.detach()` 对 `log_prob` 的梯度为 1，使梯度仍然落到各 Token 的 Log Probability 上。这正是论文 GSPO-token 的实现形式。
-
-### 11.3 Loss Reduction 不能随便选
-
-verl 对 GSPO 使用 `seq-mean-token-mean`：
-
-1. 每条回答先对有效 Token 求平均；
-2. 再对 Batch 中的回答求平均。
-
-```math
-L
-=
-\frac{1}{B}
-\sum_{i=1}^{B}
-\frac{1}{T_i}
-\sum_{t=1}^{T_i}
-L_{i,t}
-```
-
-这与 GSPO 的每序列等权设计一致。如果换成全局 Token Mean，长回答会因为包含更多 Token 而拥有更大总权重，优化目标就发生了变化。
-
-## 12. 为什么 GSPO 对 MoE 更稳定
-
-### 12.1 MoE 的 Expert Routing Volatility
-
-MoE 模型的每个 Token 只激活部分专家。策略更新后，即使输入 Token 不变，Router 也可能选择不同专家，导致同一个 Token 的 Log Probability 出现明显变化。
-
-论文报告，在一个 48 层 Qwen3-30B-A3B-Base 模型上，对同一个 Rollout 样本执行梯度更新后，新旧策略激活的专家约有 10% 不同。
-
-在 GRPO 中，这会直接影响每个 Token 的：
-
-```math
-w_{i,t}
-=
-\frac{\pi_\theta(y_{i,t}\mid s_{i,t})}
-{\pi_{\theta_{\mathrm{old}}}(y_{i,t}\mid s_{i,t})}
-```
-
-少量 Token Ratio 的剧烈变化可能改变裁剪决策和梯度权重。
-
-### 12.2 Routing Replay 的代价
-
-Qwen 团队此前使用 Routing Replay：缓存旧策略的专家路由，并在新策略重算 Log Probability 时强制复用旧路由。
-
-它能让分子、分母经过相同的专家子网络，但会带来：
-
-- 路由信息的额外存储；
-- 分布式通信开销；
-- 对新策略自由选择专家的限制；
-- 更复杂的训练基础设施。
-
-GSPO 对 Token 波动取序列平均，只关心序列级总体似然变化。论文实验中，GSPO 无需 Routing Replay 也能稳定训练 MoE。
-
-> [!warning]
-> “序列平均更鲁棒”不表示单 Token 数值误差消失，而是正负波动可能在序列聚合中部分抵消，单个 Token 不再独立决定自己的 Ratio 与裁剪状态。
-
-## 13. 为什么 GSPO 可能简化 RL 基础设施
-
-大规模 RL 常把 Rollout 与训练分离：
-
-```text
-Rollout Engine：vLLM / SGLang
-Training Engine：FSDP / Megatron
-```
-
-即使加载同一组权重，两边也可能因为以下因素得到略有不同的 Log Probability：
-
-- 并行切分与归约顺序；
-- 混合精度与量化；
-- 不同 Attention Kernel；
-- MoE Router 的数值波动；
-- Padding、Sampling 或 Logits Processor 实现差异。
-
-GRPO 对 Token Ratio 很敏感，因此工程上常用训练引擎重新计算旧策略 Log Probability。
-
-GSPO 使用序列平均 Log-Ratio，对局部数值差异更容忍。论文据此认为，未来可能直接使用推理引擎返回的旧 Log Probability，减少旧策略重算，尤其适合：
-
-- Training-Inference Disaggregation；
-- Partial Rollout；
-- Multi-Turn RL；
-- 大规模 MoE Rollout。
-
-这里应当把“可能简化”理解为工程潜力，而不是所有系统都可以立即删掉 Old Logprob Recompute。是否安全仍需监控推理—训练 Log Probability Gap。
-
-## 14. 实验结果应该怎样读
+## 12. 实验结果应该怎样读
 
 论文从 Qwen3-30B-A3B-Base 的 Cold-Start Checkpoint 开始训练，并在以下任务评估：
 
@@ -1146,11 +1232,11 @@ GSPO 使用序列平均 Log-Ratio，对局部数值差异更容忍。论文据�
 一个反直觉现象是：GSPO 被裁剪的 Token 比例比 GRPO 高约两个数量级，但训练效率仍然更高。论文把它解释为：GRPO 虽然保留了更多 Token 梯度，这些梯度却更嘈杂；GSPO 使用更少但更一致的序列信号。
 
 > [!warning]
-> 这些结果证明了 GSPO 在论文特定模型、任务和基础设施上的有效性，但不能推出它在所有 Dense 模型、所有 Reward 设计和所有训练规模上都必然优于 GRPO。特别是论文的核心稳定性收益与大型 MoE、长序列训练高度相关。
+> 这些结果证明了 GSPO 在论文特定模型和任务上的有效性，但不能推出它在所有 Dense 模型、所有 Reward 设计和所有训练规模上都必然优于 GRPO。特别是论文的核心稳定性收益与大型 MoE、长序列训练高度相关。
 
-## 15. GSPO 没有解决什么
+## 13. GSPO 没有解决什么
 
-### 15.1 没有解决零方差组
+### 13.1 没有解决零方差组
 
 如果同一个 Prompt 的回答全部正确或全部错误：
 
@@ -1160,7 +1246,7 @@ GSPO 使用序列平均 Log-Ratio，对局部数值差异更容忍。论文据�
 
 组内 Advantage 接近 0，仍然缺少有效梯度。GSPO 没有像 DAPO Dynamic Sampling 那样专门过滤零方差组。
 
-### 15.2 没有真正完成 Token-Level Credit Assignment
+### 13.2 没有真正完成 Token-Level Credit Assignment
 
 标准 GSPO 让整条回答共享一个 Reward、Advantage 和 Ratio。它提高了一致性，但不知道：
 
@@ -1170,13 +1256,13 @@ GSPO 使用序列平均 Log-Ratio，对局部数值差异更容忍。论文据�
 
 需要过程奖励或 Token Advantage 时，应考虑 GSPO-token 或更细粒度的优化单位。
 
-### 15.3 整条序列一起裁剪会损失样本
+### 13.3 整条序列一起裁剪会损失样本
 
 如果序列 Ratio 越界，整条回答中的 Token 都会受到裁剪。它避免了 Token 级噪声，却可能因为局部异常而失去整条序列的学习信号。
 
 Qwen 后续提出 SAPO 时，也把硬裁剪导致的学习信号丢失视为 GSPO/GRPO 的共同限制之一。
 
-### 15.4 长度归一化可能引入长度偏好
+### 13.4 长度归一化可能引入长度偏好
 
 $`1/T_i`$ 次方使不同长度回答的 Ratio 更可比，但也改变了原始轨迹概率比。回答长度分布发生变化时，需要同时观察：
 
@@ -1185,7 +1271,7 @@ $`1/T_i`$ 次方使不同长度回答的 Ratio 更可比，但也改变了原始
 - 不同长度 Bucket 的 Clip Fraction；
 - 是否出现 Response Length Collapse。
 
-### 15.5 不解决 Reward Hacking
+### 13.5 不解决 Reward Hacking
 
 GSPO 只改变 Policy Update。它不会自动修复：
 
@@ -1195,14 +1281,14 @@ GSPO 只改变 Policy Update。它不会自动修复：
 - 格式漏洞；
 - 训练集与评估集泄漏。
 
-## 16. GSPO、PPO、GRPO、DAPO 的关系
+## 14. GSPO、PPO、GRPO、DAPO 的关系
 
 | 方法 | 最值得记住的变化 | 主要解决的问题 |
 | --- | --- | --- |
 | PPO | Value / GAE + Token Ratio + Clipping | 通用近端策略更新 |
 | GRPO | 用组内相对 Reward 代替 Value Model | 降低 Critic 的显存与训练成本 |
 | DAPO | 在 GRPO 上加入 Clip-Higher、Dynamic Sampling、Token-Level Loss、Overlong Shaping | 长链 RL 的探索、有效样本与 Reward Noise |
-| GSPO | 将 Importance Ratio 与 Clipping 提升到序列级 | 长序列、MoE 与训练—推理 Logprob Mismatch 下的稳定性 |
+| GSPO | 将 Importance Ratio 与 Clipping 提升到序列级 | 长序列与 MoE 中的 Token Ratio 波动 |
 
 不要把 DAPO 与 GSPO 当作完全互斥的同层概念：
 
@@ -1211,34 +1297,13 @@ GSPO 只改变 Policy Update。它不会自动修复：
 
 实际系统可以吸收两者的部分思想，例如同时处理零方差组、Overlong Reward，并选择序列级 Policy Loss。但组合后目标已经不再等同于任何单篇论文的原始设置，需要重新验证。
 
-## 17. 训练中应该监控什么
-
-| 指标 | 观察重点 | 异常信号 |
-| --- | --- | --- |
-| Train Reward | 是否稳定上升 | 突升但 Eval 不升，可能 Reward Hacking |
-| Eval Pass@1 / Pass@k | 泛化能力是否同步改善 | Train Reward 上升但 Eval 下降 |
-| Response Length | 推理长度是否健康变化 | 突然塌缩或持续无效增长 |
-| Entropy | 探索是否过早消失 | 快速跌到极低值 |
-| Sequence Ratio $`s_i`$ | 新旧策略整体偏移 | 长尾持续扩大 |
-| Sequence Clip Fraction | 有多少回答失去未裁剪梯度 | 长期接近 0 或 1 都值得检查 |
-| Approx KL | 新旧策略总体变化 | 与 Ratio、Reward 曲线不一致 |
-| Gradient Norm | 优化是否稳定 | 尖峰、NaN 或持续放大 |
-| Zero-Variance Group Fraction | 有效 Group Advantage 密度 | 模型变强后持续升高 |
-| Train-Rollout Logprob Gap | 推理与训练引擎一致性 | 明显漂移或随长度增加 |
-| MoE Router Churn | 同一样本新旧策略路由变化 | Token Ratio 与路由变化强相关 |
-
-> [!important]
-> 只看 Reward 不足以判断 GSPO 是否稳定。至少应把 Reward、Eval、Length、Entropy、Sequence Ratio、Clip Fraction 和 Gradient Norm 放在同一张训练仪表盘中。
-
-## 18. 什么时候更值得使用 GSPO
+## 15. 什么时候更值得使用 GSPO
 
 更适合：
 
 - Reward 本身是整条回答级别；
 - 长 CoT 或长代码生成；
 - 大型 MoE Policy；
-- Rollout 与 Training Engine 分离；
-- Token Logprob Mismatch 难以彻底消除；
 - GRPO 出现 Ratio 长尾、梯度尖峰或不可逆训练崩溃。
 
 未必优先：
@@ -1247,7 +1312,7 @@ GSPO 只改变 Policy Update。它不会自动修复：
 - 有可靠 Token / Step Reward，需要细粒度 Credit Assignment；
 - Group Reward 经常零方差，主要瓶颈在有效样本而不是 Ratio；
 - Reward 或数据质量本身尚未稳定；
-- 训练预算不足以系统调试极小 Clip Range 与 Loss Reduction。
+- 训练预算不足以重新校准极小 Clip Range 和长度归一化 Ratio。
 
 推荐决策顺序：
 
@@ -1256,21 +1321,21 @@ Reward 是否是序列级？
   ├─ 否：优先考虑 Token / Step Advantage 目标
   └─ 是
       ↓
-GRPO 是否存在长序列、MoE 或 Logprob Mismatch 不稳定？
+GRPO 是否存在长序列或 MoE Ratio 不稳定？
   ├─ 否：先保留更简单的 GRPO 基线
   └─ 是
       ↓
 切换 GSPO，并重新校准：
-Clip Range、Sequence Ratio、Loss Reduction、Rollout Freshness
+Clip Range、Sequence Ratio 与回答长度分布
 ```
 
-## 19. 常见误解
+## 16. 常见误解
 
-### 19.1 “GSPO 不做 Token 梯度”
+### 16.1 “GSPO 不做 Token 梯度”
 
 错误。Transformer 的输出仍然是逐 Token Log Probability，梯度仍然逐 Token 回传。GSPO 只是让同一回答的 Token 共享序列级权重。
 
-### 19.2 “GSPO 就是把 Token Ratio 相乘”
+### 16.2 “GSPO 就是把 Token Ratio 相乘”
 
 不完整。直接相乘得到原始序列 Ratio，长序列数值极不稳定。GSPO 使用的是长度归一化几何平均：
 
@@ -1278,37 +1343,37 @@ Clip Range、Sequence Ratio、Loss Reduction、Rollout Freshness
 s_i=(\prod_t w_{i,t})^{1/T_i}
 ```
 
-### 19.3 “Group Sequence 指多个回答合并成一个序列”
+### 16.3 “Group Sequence 指多个回答合并成一个序列”
 
 错误：
 
 - Group：同一个 Prompt 采样多条回答，用于相对 Advantage；
 - Sequence：每一条回答是 Ratio 与 Clipping 的优化单位。
 
-### 19.4 “GSPO 是严格 On-Policy”
+### 16.4 “GSPO 是严格 On-Policy”
 
 不完全准确。它属于 PPO 风格的近似 On-Policy 方法：Rollout 来自 $`\pi_{\theta_{\mathrm{old}}}`$，Mini-Batch 更新中的策略是 $`\pi_\theta`$，二者之间存在受控的有限偏移。
 
-### 19.5 “GSPO 一定比 GRPO 好”
+### 16.5 “GSPO 一定比 GRPO 好”
 
-错误。GSPO 用更粗的优化单位换取稳定性。它可能牺牲局部 Credit Assignment 和样本利用率，收益最明显的场景是长序列、大规模 MoE 和训练—推理分离系统。
+错误。GSPO 用更粗的优化单位换取稳定性。它可能牺牲局部 Credit Assignment 和样本利用率，收益最明显的场景是长序列和大型 MoE。
 
-## 20. 面试回答模板
+## 17. 面试回答模板
 
 > GSPO 是 Qwen 提出的 Group Sequence Policy Optimization。它保留 GRPO 的组采样和组内相对 Advantage，但解决了序列级 Reward 与 Token-Level Importance Ratio 粒度不一致的问题。
 >
 > GRPO 对回答中的每个 Token 分别计算新旧策略概率比并分别裁剪；GSPO 先把整条回答的 Token Log-Ratio 求平均，再取指数，得到长度归一化的序列 Ratio，随后整条回答只做一次裁剪。同一回答中的所有 Token 共用这个 Ratio 和序列 Advantage，但梯度仍通过每个 Token 的 Log Probability 回传。
 >
-> 这种设计减少了长序列中 Token Ratio 的高方差噪声，对 MoE 专家路由变化和训练—推理引擎 Logprob 差异更鲁棒。代价是 Credit Assignment 更粗，整条序列一起裁剪也可能降低样本利用率。因此 GSPO 更适合序列级 Reward、长 CoT、大型 MoE 和分离式 RL 基础设施，而不是无条件替代 GRPO。
+> 这种设计减少了长序列中 Token Ratio 的高方差噪声，也降低了 MoE 专家路由变化造成的局部概率波动对单个 Token 更新的控制力。代价是 Credit Assignment 更粗，整条序列一起裁剪也可能降低样本利用率。因此 GSPO 更适合序列级 Reward、长 CoT 和大型 MoE，而不是无条件替代 GRPO。
 
-## 21. 复习时最应该记住的七点
+## 18. 复习时最应该记住的七点
 
 1. GSPO 保留 GRPO 的 Group-Relative Advantage，不需要 Value Model。
 2. GRPO 是“序列 Advantage + Token Ratio”，GSPO 是“序列 Advantage + 序列 Ratio”。
 3. GSPO Ratio 是 Token Ratio 的几何平均，而不是未经归一化的连乘。
 4. 长度归一化控制数值尺度，但也使它不再是原始严格序列 IS Weight。
 5. GSPO 的梯度仍然逐 Token 回传，只是同一回答中的 Token 共享权重。
-6. 它对长序列、MoE Routing 和 Rollout-Training Logprob Mismatch 更鲁棒。
+6. 它对长序列和 MoE Routing 引起的局部 Ratio 波动更鲁棒。
 7. 它没有解决零方差组、Reward Hacking 和真正的 Token-Level Credit Assignment。
 
 ## 相关知识
@@ -1324,9 +1389,4 @@ s_i=(\prod_t w_{i,t})^{1/T_i}
 
 1. Zheng et al., [Group Sequence Policy Optimization](https://arxiv.org/abs/2507.18071), 2025.
 2. Qwen Team, [GSPO: Towards Scalable Reinforcement Learning for Language Models](https://qwenlm.github.io/blog/gspo/), 2025.
-3. verl, [`compute_policy_loss_gspo`](https://verl.readthedocs.io/en/latest/_modules/verl/trainer/ppo/core_algos.html#compute_policy_loss_gspo).
-4. verl, [Qwen3-8B GSPO Training Example](https://github.com/verl-project/verl/blob/main/examples/gspo_trainer/run_qwen3_8b_fsdp.sh).
-5. Qwen Team, [SAPO: Soft Adaptive Policy Optimization](https://qwen.ai/blog?from=research.latest-advancements-list&id=sapo).
-
-> [!warning]
-> 阅读实现时务必同时检查 Ratio 定义、Stop-Gradient 路径、Response Mask 和 Loss Reduction。仅仅在配置中把 `loss_mode` 改成 `gspo`，但沿用不匹配的聚合方式或 Clip Range，得到的目标可能已经偏离论文。
+3. Qwen Team, [SAPO: Soft Adaptive Policy Optimization](https://qwen.ai/blog?from=research.latest-advancements-list&id=sapo).
