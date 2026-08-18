@@ -23,7 +23,6 @@ tags:
 >
 > - [RankMixer: Scaling Up Ranking Models in Industrial Recommenders（arXiv:2507.15551）](https://arxiv.org/abs/2507.15551)
 > - [论文 HTML 版](https://arxiv.org/html/2507.15551) / [论文 PDF](https://arxiv.org/pdf/2507.15551)
-> - [推荐系统学习笔记｜OneTrans 主线](https://www.xiaohongshu.com/explore/69eb72010000000020039fdd)（仅参考“总览—问题—方法—总结”的组织方式）
 
 > [!NOTE]
 > **一句话概括：** RankMixer 把工业排序模型中异构、低 GPU 利用率的手工特征交互模块，替换成“无参数的 Multi-head Token Mixing + 每个 token 独立参数的 Per-token FFN”，以规则的大矩阵计算换取更高 MFU，并沿 token 数、宽度、深度和专家数四个方向稳定扩容。
