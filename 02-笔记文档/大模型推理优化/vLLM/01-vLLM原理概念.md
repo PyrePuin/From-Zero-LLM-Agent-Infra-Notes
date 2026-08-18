@@ -13,11 +13,12 @@ tags: [LLM, Inference, Serving, vLLM, KV-Cache, PagedAttention, Continuous-Batch
 > 主要参考：
 >
 > - [猛猿：图解大模型计算加速系列之：vLLM 核心技术 PagedAttention 原理](https://zhuanlan.zhihu.com/p/691038809)
+> - [猛猿：图解大模型计算加速系列：vLLM 源码解析 1，整体架构](https://zhuanlan.zhihu.com/p/691045737)
 > - [VLLM 学习笔记](https://github.com/jiaran-king/Re-Zero---Starting-LLM-/blob/main/02-%E6%A6%82%E5%BF%B5%E7%AC%94%E8%AE%B0/vllm/VLLM%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0.md)
 > - [vLLM V1 官方说明](https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html)
 > - [vLLM V1 Architecture Overview](https://docs.vllm.ai/en/latest/design/arch_overview.html)
 >
-> 本文重新组织和改绘了知识结构，不复刻来源文章的文字和图片。所有流程图均为根据原理重新绘制的示意图。
+> 本文重新组织了知识结构。除标明“来源：猛猿”的 3 张历史架构图外，其余流程图均为根据原理重新绘制的示意图；转载图片保留原作者水印，并在图下注明版本边界。
 
 > [!note]
 > vLLM 不是一种新的模型结构，而是一个面向大模型推理和在线服务的运行时。它通过 **PagedAttention、Continuous Batching、Chunked Prefill、Prefix Caching、优化 Kernel 和分布式执行**，在有限显存上同时服务更多请求，并改善吞吐、首 token 延迟和逐 token 延迟。
@@ -165,7 +166,7 @@ M_{KV}
 
 ---
 
-## 2. PagedAttention：让 KV Cache 像分页内存一样按需增长
+## 2. PagedAttention：让 KV Cache 按需分块增长
 
 ### 2.1 传统连续分配的问题
 
@@ -203,7 +204,7 @@ request C 实际使用 = 500 tokens
 
 ### 2.2 解决办法：固定大小的 Block
 
-PagedAttention 借鉴虚拟内存分页思想：
+PagedAttention 不再要求一条请求的 KV Cache 占据一段完整的连续显存，而是直接采用固定大小的 Block：
 
 1. 把 KV Cache 显存切成固定大小的物理块；
 2. 每条请求从逻辑上仍然看到连续 token；
@@ -354,6 +355,8 @@ C：████████████ 完成后空闲…………
 
 Continuous Batching 的核心是：**每个 Engine Iteration 都重新决定本轮工作集合。**
 
+这里的 Iteration 不是“一条请求完整生成一次”，而是一次调度、一次模型执行和一次状态更新组成的引擎循环。对普通 Decode 请求，它通常只向前推进 1 个 token；对 Chunked Prefill 或 Speculative Decode，请求在同一轮可以推进多个 token。
+
 ```mermaid
 sequenceDiagram
   participant W as Waiting Queue
@@ -370,17 +373,27 @@ sequenceDiagram
   S->>G: Iteration 3：B + D + E
 ```
 
-#### 简单例子
+#### 一个更细的例子
 
-假设 GPU 每轮最多容纳 3 个活跃请求：
+假设每轮最多容纳 3 个活跃请求，A、B、C 在开始时已经完成 Prefill，D 和 E 随后到达：
 
-| Iteration | 本轮请求 | 本轮结束后的变化 |
-| --- | --- | --- |
-| 1 | A、B、C | A 完成 |
-| 2 | B、C、D | C 完成，D 是新加入的 |
-| 3 | B、D、E | E 是新加入的 |
+| Iteration | 轮开始时的状态 | 本轮 Batch | 轮结束后的变化 |
+| --- | --- | --- | --- |
+| 1 | A 还差 1 token；B 还差 4；C 还差 2 | A Decode 1；B Decode 1；C Decode 1 | A 完成并立即释放 KV blocks |
+| 2 | D 已到达；B 还差 3；C 还差 1 | B Decode 1；C Decode 1；D Prefill | C 完成；D 的 Prompt 已算完 |
+| 3 | E 已到达；B 还差 2；D 可 Decode | B Decode 1；D Decode 1；E Prefill | B、D 继续；E 进入可 Decode 状态 |
+| 4 | B 还差 1；D、E 均在生成 | B Decode 1；D Decode 1；E Decode 1 | B 完成，下一轮又能接纳新请求 |
 
 Batch 不再是“从开始到结束不变的一组请求”，而是“本轮 GPU 要执行的一组工作”。
+
+从这个例子可以看出，Continuous Batching 同时做了三件事：
+
+1. 已完成的请求在轮结束后退出，不再占着固定 Batch 槽位；
+2. waiting 请求不必等整批结束，只要预算允许就能在下一轮加入；
+3. Prefill 与 Decode 可以出现在同一个 Batch 中，只是每个请求本轮推进的 token 数不同。
+
+> [!note]
+> Continuous Batching 也常被称为 In-flight Batching。它和普通 Dynamic Batching 不完全相同：Dynamic Batching 往往只是在入口短暂等待、凑成一批；Continuous Batching 则在请求执行期间持续重组 Batch。
 
 ### 3.3 Scheduler 要同时看多份预算
 
@@ -399,7 +412,38 @@ Continuous Batching 不是简单把队列拼起来。Scheduler 至少要检查�
 - `max_num_seqs`：一个 Iteration 的请求数量上限；
 - `gpu_memory_utilization`：可供模型和 KV Cache 使用的显存比例相关配置。
 
-### 3.4 PagedAttention 与 Continuous Batching 的关系
+以 `max_num_batched_tokens=4096`、`max_num_seqs=64` 为例：即使当前只有 20 个 Decode 请求，每个请求本轮只需要 1 token，Scheduler 也不能无条件再塞入任意长 Prompt。它还要确认：
+
+```text
+本轮 token 已用：20
+本轮 token 剩余：4076
+活跃请求数：20，尚有 44 个请求槽位
+KV Cache：必须能为这些请求本轮新增的 token 分配 blocks
+```
+
+只有 token、sequence、KV Cache 等约束同时满足，请求才能进入本轮。**Batch 的形状由多份预算共同决定，不是单看请求数量。**
+
+### 3.4 请求在多轮之间怎样流动
+
+可以用三个核心状态建立直觉：
+
+```mermaid
+stateDiagram-v2
+  [*] --> Waiting: 请求到达
+  Waiting --> Running: 获得 token 与 KV Cache 预算
+  Running --> Running: 本轮执行后仍未完成
+  Running --> Finished: 遇到 EOS、长度上限或停止条件
+  Running --> Waiting: 被抢占，需要等待重算
+  Finished --> [*]
+```
+
+- `Waiting`：尚未获得本轮执行资格，或被抢占后等待恢复；
+- `Running`：已经持有运行状态，Scheduler 每轮决定它推进多少 token；
+- `Finished`：生成完成，KV blocks 可以回收。
+
+不同版本内部还可能记录更细的状态，但 Continuous Batching 的关键，就是在每个 Iteration 边界重新处理这些进入、退出和继续运行的变化。
+
+### 3.5 PagedAttention 与 Continuous Batching 的关系
 
 这两者经常一起出现，但职责不同：
 
@@ -420,6 +464,8 @@ PagedAttention：为这些请求提供和回收 KV blocks
 
 假设系统中已有 20 个请求正在 Decode，此时来了一个 16000-token 的长 Prompt。如果完整 Prefill 一次性进入某轮 Forward，它可能占据大量计算时间，让正在流式输出的请求长时间收不到下一个 token。
 
+Prefill 与 Decode 的计算形态并不相同：Prefill 一次处理大量 Prompt token，通常更容易吃满计算单元；普通 Decode 每个请求每轮只新增 1 个 token，更容易受内存带宽和调度间隔影响。把一个超长 Prefill 整体插入正在流式输出的工作负载，会让某一次 Iteration 变得特别长。
+
 用户会感受到：
 
 - 长 Prompt 自己的 TTFT 很高；
@@ -436,7 +482,14 @@ PagedAttention：为这些请求提供和回收 KV blocks
     → chunk 4：3712 tokens
 ```
 
-每轮只处理其中一部分，并把剩余 token budget 留给 Decode 请求。
+每轮只处理其中一部分，并把 token budget 优先留给正在运行的 Decode 请求。现代 V1 Scheduler 的直觉可以概括成：
+
+1. 先计算本轮 running 请求需要推进多少 token；
+2. 从 `max_num_batched_tokens` 中扣除这些 token；
+3. 再用剩余预算接纳 waiting 请求或长 Prompt 的一段 Prefill；
+4. 如果剩余预算装不下完整 Prompt，就把实际可调度的 token 数截断，这一段自然成为本轮的 chunk。
+
+因此，**chunk 不一定是预先固定为 4096 token 的永久切片**。它通常由本轮剩余 token budget、模型长度上限、KV Cache 空间和其他请求共同决定；下一轮的 chunk 大小可能不同。
 
 ```mermaid
 flowchart LR
@@ -450,14 +503,38 @@ flowchart LR
 
 ### 4.3 简单例子
 
-本轮 token budget 为 8192：
+假设：
 
 ```text
-20 个 Decode 请求：20 tokens
-剩余预算：8172 tokens
+max_num_batched_tokens = 4096
+32 个 Running Decode 请求：每个本轮需要 1 token
+新到达的长 Prompt：10000 tokens
 ```
 
-Scheduler 可以先安排 Decode，再从长 Prompt 中安排不超过剩余预算的 Prefill token。下轮继续处理未完成的 Prompt。
+如果暂时没有其他请求进出，可以得到下面的简化过程：
+
+| Iteration | Decode 占用 | Prefill 可用预算 | 长 Prompt 本轮进度 | 累计已 Prefill |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 32 | 4064 | 处理 4064 tokens | 4064 / 10000 |
+| 2 | 32 | 4064 | 再处理 4064 tokens | 8128 / 10000 |
+| 3 | 32 | 4064 | 只剩 1872 tokens | 10000 / 10000 |
+| 4 | 33 | 4063 | 原 32 个请求 + 长 Prompt 各 Decode 1 token | 长 Prompt 开始生成 |
+
+这个例子里，前两轮 chunk 恰好都是 4064，第三轮却只有 1872。原因不是第三块被预先切成了 1872，而是 Prompt 只剩这么多未计算 token。
+
+真实运行时还会继续变化。例如第二轮新来了 8 个可运行的 Decode 请求，Decode 占用就会从 32 增加到 40，长 Prompt 的本轮上限随之变成 4056；如果 KV Cache 只能再容纳 3000 个 token，那么即使 token budget 还剩 4056，本轮也只能推进不超过可分配空间的部分。
+
+#### Prefix Cache 命中时怎么算
+
+假设上述 10000-token Prompt 的前 2048 tokens 已命中 Prefix Cache，那么这 2048 tokens 不需要重新执行模型 Forward。Scheduler 会把已命中的计算进度向前推进，只为未命中的后缀安排实际计算：
+
+```text
+逻辑 Prompt 长度：10000
+Prefix Cache 命中：2048
+仍需实际 Prefill：7952
+```
+
+因此 Chunked Prefill 管的是“本轮实际还要计算多少 token”，而 Prefix Caching 负责减少“总共还需要计算多少 token”。两者可以叠加。
 
 ### 4.4 它解决了什么，又牺牲了什么
 
@@ -465,6 +542,14 @@ Scheduler 可以先安排 Decode，再从长 Prompt 中安排不超过剩余预�
 | --- | --- | --- |
 | 较小的 Prefill Chunk | Decode 更容易及时运行，ITL 更好 | 长 Prompt 需要更多轮，TTFT 可能变差 |
 | 较大的 Prefill Chunk | 长 Prompt 更快完成 Prefill，TTFT 可能更好 | Decode 更容易被大计算拖慢 |
+
+调参时可以把三个目标分开看：
+
+- **TTFT**：长 Prompt 经过多少轮才完成 Prefill；
+- **ITL**：已有 Decode 请求两次输出之间是否被长 Iteration 拉开；
+- **Throughput**：GPU 是否因为 chunk 太碎、调度过于频繁而损失整体效率。
+
+Chunk 太大，单轮计算时间可能形成尖峰；Chunk 太小，长 Prompt 要跨更多轮，调度与批次准备开销上升。最佳值取决于 Prompt 长度分布、并发量、模型和硬件，并不存在对所有服务都通用的固定数字。
 
 > [!important]
 > Chunked Prefill 是调度优化，不是把 Prefill 的总计算量凭空消除。它主要改变计算在时间上的排列方式。
@@ -575,24 +660,69 @@ Continuous Batching 会尽量让更多请求活跃，但所有请求的 KV Cache
 
 ### 6.2 解决办法
 
-Scheduler 可以：
+Scheduler 先尝试让高优先级或更早进入运行态的请求继续前进。如果 `KVCacheManager` 无法为本轮新增 token 分配 slots，就必须减少同时驻留在 KV Cache 中的请求。它可以：
 
 - 暂缓接纳 waiting 请求；
 - 抢占部分 running 请求；
 - 释放被抢占请求的 KV blocks；
-- 等资源恢复后重新计算其上下文；
+- 把被抢占请求重新放回 waiting 队列；
+- 等资源恢复后重新计算其上下文，使 `num_computed_tokens` 再次追上目标位置；
 - 某些架构或配置也可以把 KV Cache Offload 到其他存储层。
 
-### 6.3 简单例子
+下面这张图来自 2024 年文章，展示的是经典 V0 Scheduler、BlockSpaceManager 与 BlockAllocator 的关系。它很适合建立“调度器做决定、块管理器执行分配或释放”的直觉，但图中的类名和 swapped queue 不是现代 V1 的源码结构。
 
-A 比 B 更早到达，显存只够一个请求继续增长：
+![经典 vLLM 的调度、块分配与抢占关系](./assets/01-vLLM原理概念/03-经典调度与抢占.jpg)
+
+> 图源：[猛猿：vLLM 源码解析 1，整体架构](https://zhuanlan.zhihu.com/p/691045737)，保留原水印。图示基于经典 V0 实现，阅读现代 V1 时应映射为 Scheduler、KVCacheManager 与 BlockPool 等新对象。
+
+### 6.3 抢占谁：不仅是“后来的请求先让路”
+
+概念例子常写成“先到的 A 抢占后到的 B”，但实际选择还会受到调度策略、显式 priority、请求当前状态和实现版本影响。可以先抓住两个原则：
+
+1. Scheduler 要保证本轮被选中的请求确实能获得新增 KV slots，不能只生成一个超出内存能力的计划；
+2. 被抢占者释放的 blocks 必须足够让更优先的工作继续，否则还要继续释放或缩小本轮计划。
+
+在常见的重计算式抢占中，被抢占请求的 token 文本和请求元数据仍然存在，丢掉的是 GPU 中间的 KV 状态。恢复时不是重新分词，也不是重新请求客户端，而是重新执行模型计算来重建 KV Cache。
+
+### 6.4 一个按 Block 计算的例子
+
+假设 KV Cache 一共只有 12 个 blocks，当前占用如下：
 
 ```text
-A：已生成 500 tokens，即将继续
-B：已生成 100 tokens，后到达
+A：占 5 blocks，仍需继续生成
+B：占 4 blocks，仍需继续生成
+C：占 3 blocks，仍需继续生成
+空闲：0 blocks
 ```
 
-Scheduler 可以优先保障 A，抢占 B 并释放 B 的块。A 完成后，B 再重新 Prefill 或从可恢复状态继续。
+下一轮 A 和 B 都恰好要跨过当前 block 的容量边界，因此各需要 1 个新 block。Scheduler 决定优先推进 A、B，并选 C 作为牺牲者：
+
+```text
+1. 抢占 C，释放 3 blocks
+2. 给 A 分配 1 block
+3. 给 B 分配 1 block
+4. 剩余 1 block；C 回到 waiting 队列
+```
+
+此时 A 占 6、B 占 5，共 11 blocks。等 A 或 B 完成并释放空间后，C 再次被调度；如果采用重计算恢复，C 需要从其已保留的 token 序列重新计算上下文，重建刚才释放的 KV Cache。
+
+这个选择的代价很明确：A、B 的 ITL 得到保护，C 却增加了等待时间和重复计算。如果 C 已经运行很久、上下文很长，重计算成本会很高；因此频繁抢占通常说明并发上限、上下文长度或 KV Cache 容量之间不匹配。
+
+### 6.5 三种“腾空间”思路
+
+| 思路 | 释放 GPU KV 空间 | 恢复代价 | 适合怎样理解 |
+| --- | --- | --- | --- |
+| 仅让新请求等待 | 否 | 没有重复计算，但新请求排队更久 | 不打断 running 请求 |
+| Recompute | 是 | 重新执行已丢弃上下文的 Forward | 以计算换显存，V1 常见心智模型 |
+| Swap / Offload | 是 | 数据搬运、带宽与额外存储开销 | 以传输和其他存储层换显存 |
+
+如果线上持续出现大量 preemption，可以从几个方向排查：
+
+- `max_num_seqs` 是否让过多长请求同时驻留；
+- 最大上下文和实际输出长度是否过大；
+- `gpu_memory_utilization` 留给 KV Cache 的空间是否过小；
+- 能否使用更低精度的 KV Cache、更多 GPU 或更合适的并行策略；
+- 调度参数是否过度追求并发，反而产生大量重计算。
 
 > [!warning]
 > Swap、Recompute、Offload 的具体支持和默认策略会随 vLLM 版本及硬件后端变化。理解概念时应抓住不变量：抢占是在延迟、公平性、重复计算和有限 KV Cache 之间做取舍。
@@ -639,7 +769,35 @@ request B → 本轮计算 1024 tokens
 request C → 本轮验证 4 speculative tokens
 ```
 
-### 7.3 一个混合 Batch 的例子
+### 7.3 一轮调度大致经历什么
+
+忽略多模态和结构化输出等分支后，可以把 V1 的一轮调度理解成下面这条主线：
+
+```mermaid
+flowchart TD
+  A["读取 Running 与 Waiting 请求"] --> B["先为 Running 请求计算本轮 new tokens"]
+  B --> C["受 token budget 与 model length 截断"]
+  C --> D["向 KVCacheManager 申请 slots"]
+  D -->|"成功"| E["记录本轮 request → num_scheduled_tokens"]
+  D -->|"空间不足"| F["选择请求抢占并释放 blocks"]
+  F --> D
+  E --> G["用剩余预算检查 Waiting 请求"]
+  G --> H["查询 Prefix Cache、分配 slots、必要时切分 Prefill"]
+  H --> I["生成 SchedulerOutput 交给 Executor"]
+```
+
+更细地说：
+
+1. **Running 优先推进**：普通 Decode 往往需要 1 token，Chunked Prefill 或 Speculative Decode 可能需要多个；
+2. **扣减 token budget**：任何请求本轮安排的 token 都会消耗 `max_num_batched_tokens`；
+3. **申请 KV slots**：调度结果必须有真实的 KV Cache 空间支撑；
+4. **必要时抢占**：分配失败时释放较低优先级请求的 blocks，再重新尝试；
+5. **接纳 Waiting**：剩余预算允许时查询 Prefix Cache，并为新请求安排 Prefill 或其一个 chunk；
+6. **输出执行计划**：SchedulerOutput 不只是请求列表，还要携带每个请求的 token 数、KV block 相关信息以及其他执行元数据。
+
+调度优先级不是一个孤立的排序值。即使某请求排在前面，它仍可能因为 model length、token budget、KV Cache 或 Encoder Budget 不满足而无法按原计划执行。
+
+### 7.4 一个混合 Batch 的例子
 
 ```text
 请求 A：正在 Decode，本轮需要 1 token
@@ -650,6 +808,31 @@ request C → 本轮验证 4 speculative tokens
 
 它们在业务语义上属于不同阶段，但 Scheduler 可以统一成“每个请求本轮处理多少 token”。
 
+把数字补全，假设本轮 token budget 为 4096：
+
+| 请求 | 状态 | 初步需求 | 实际占用本轮预算 |
+| --- | --- | ---: | ---: |
+| A | 普通 Decode | 1 | 1 |
+| B | 长 Prompt 尚余 6000 tokens | 6000 | 2048，假设本轮策略只给 B 这些预算 |
+| C | 4096-token 前缀命中，suffix 为 64 | 64 | 64 |
+| D | 验证 speculative tokens | 4 | 4 |
+| 其他请求 | Decode | 合计 80 | 80 |
+
+这部分总计占用 2197 tokens，还剩 1899。Scheduler 可以继续接纳其他 waiting 请求，也可以让 B 的 chunk 更大；最终选择取决于配置、优先级和 KV Cache 空间。关键点是：**4096-token Cache 命中不会再占 4096 个本轮 Forward token，真正占预算的是仍需计算的 suffix。**
+
+### 7.5 调度策略在优化什么
+
+Scheduler 不是单纯追求“这一轮塞得越满越好”，而是在多个目标之间取舍：
+
+| 目标 | 偏向的选择 | 可能的副作用 |
+| --- | --- | --- |
+| 更低 ITL | 优先保证已有 Decode 请求每轮前进 | 新长 Prompt 的 TTFT 可能上升 |
+| 更低 TTFT | 给 Prefill 更大的 chunk 或更快接纳新请求 | Decode Iteration 可能变长 |
+| 更高吞吐 | 形成更饱满、更高效的 GPU Batch | 单个请求的公平性或尾延迟可能变差 |
+| 更少抢占 | 限制并发驻留、预留更多 KV 空间 | 峰值并发可能降低 |
+
+这也是为什么只看 `max_num_seqs` 不够：两个同为 64 请求的 Batch，一个可能全是单 token Decode，另一个可能混入超长 Prefill，它们的计算时间、KV 增长和用户体验完全不同。
+
 > [!important]
 > Continuous Batching 是“每轮动态重组请求”；V1 Token-Level Scheduling 则进一步统一了“每个请求在本轮具体处理多少 token”。
 
@@ -657,7 +840,17 @@ request C → 本轮验证 4 speculative tokens
 
 ## 8. V1 多进程架构：谁负责什么
 
-现代 vLLM V1 将不同职责拆到多个进程：
+在看现代 V1 之前，先用两张经典 V0 图建立职责边界。第一张图说明：同步 `LLM`、异步 API Server 和 OpenAI-compatible Server 最终都会把生成任务交给引擎；第二张图把 Scheduler/Block Manager 与真正持有模型、KV Cache 和 PagedAttention 的 GPU Worker 分开。
+
+![经典 vLLM 的调用入口与 LLMEngine](./assets/01-vLLM原理概念/01-经典调用入口.jpg)
+
+> 图源：[猛猿：vLLM 源码解析 1，整体架构](https://zhuanlan.zhihu.com/p/691045737)，保留原水印。该图使用 V0 的 `LLMEngine` / `AsyncLLMEngine` 类名，适合理解入口层与引擎层的关系。
+
+![经典 vLLM 的 Centralized Controller 与 Distributed Workers](./assets/01-vLLM原理概念/02-经典控制器与Worker架构.jpg)
+
+> 图源同上，保留原水印。图中的 `BlockSpaceManager`、`BlockAllocator` 和 `Worker` 是 V0 架构；现代 V1 的进程边界、对象名称和内部通信已经变化。
+
+现代 vLLM V1 仍然保留“前端、调度与 GPU 执行分工”的本质，但将职责重新组织到多个进程：
 
 ```mermaid
 flowchart TB
@@ -1076,6 +1269,7 @@ GPU Model Runner 与优化 Kernel
 
 - [vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention](https://arxiv.org/abs/2309.06180)
 - [猛猿：vLLM 核心技术 PagedAttention 原理](https://zhuanlan.zhihu.com/p/691038809)
+- [猛猿：vLLM 源码解析 1，整体架构](https://zhuanlan.zhihu.com/p/691045737)
 - [VLLM 学习笔记](https://github.com/jiaran-king/Re-Zero---Starting-LLM-/blob/main/02-%E6%A6%82%E5%BF%B5%E7%AC%94%E8%AE%B0/vllm/VLLM%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0.md)
 - [vLLM V1 User Guide](https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html)
 - [vLLM Architecture Overview](https://docs.vllm.ai/en/latest/design/arch_overview.html)
