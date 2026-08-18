@@ -3,7 +3,7 @@ type: paper-note
 status: active
 domain: 推荐系统/生成式推荐
 created: 2026-08-18
-updated: 2026-08-18
+updated: 2026-08-19
 aliases:
   - RankMixer
   - 工业推荐排序模型 Scaling
@@ -34,7 +34,13 @@ tags:
 
 ## 0. 总揽：先看清 RankMixer 在做什么
 
-### 0.1 一张图看完整数据流
+### 0.1 模型架构图
+
+![RankMixer 模型架构图：Feature Tokenization、RankMixer Block、Token Mixing 与 Sparse-MoE](assets/rankmixer-architecture.png)
+
+> **图解：** 左侧是完整主链路：数百个异构特征 embedding 经过 Tokenization 形成 $`T\times D`$ 输入，依次通过 $`L`$ 个 RankMixer Block，最后经 mean pooling 得到多任务预测；右下展开无参数 Token Mixing 的 Split—转置—Merge 过程，右上展示 Per-token FFN 替换为 ReLU Routing Sparse-MoE 后的结构。
+
+### 0.2 一张图看完整数据流
 
 ```mermaid
 flowchart TB
@@ -60,7 +66,7 @@ flowchart TB
     H --> Y["Finish / Skip / Like / Comment / 广告价值等"]
 ```
 
-### 0.2 核心矛盾与对应设计
+### 0.3 核心矛盾与对应设计
 
 | 工业排序中的矛盾 | 常见做法的代价 | RankMixer 的回答 |
 | --- | --- | --- |
@@ -70,7 +76,7 @@ flowchart TB
 | 增大参数往往同时增大 FLOPs 和延迟 | 无法在高 QPS、低延迟服务中落地 | 通过更低 FLOPs/Param、更高 MFU 和半精度推理解耦参数与成本 |
 | Dense 模型继续扩大成本过高 | 所有参数对每个样本都激活 | 用 ReLU Routing + DTSI-MoE 稀疏激活专家 |
 
-### 0.3 读完整篇论文只需抓住三句话
+### 0.4 读完整篇论文只需抓住三句话
 
 1. **交互方式统一化：** 先把异构特征整理成少量语义 token，再通过固定的 Multi-head Token Mixing 让不同 token 交换信息。
 2. **容量分配隔离化：** token 混合之后，每个 token 进入自己的 FFN，既保留各特征子空间的专门建模能力，也能用规则的大矩阵扩大参数量。
