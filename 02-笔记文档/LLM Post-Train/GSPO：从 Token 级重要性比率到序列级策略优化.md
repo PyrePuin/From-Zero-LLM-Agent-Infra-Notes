@@ -69,65 +69,294 @@ GSPO 全称为 Group Sequence Policy Optimization，由 Qwen 团队提出，并�
 > [!important]
 > GSPO 不是新的 Reward Estimator。它仍然使用 GRPO 的 Group-Relative Advantage；创新集中在 Importance Ratio、Clipping 和梯度权重的粒度。
 
-## 2. 为什么需要 Old Policy 与 Importance Ratio
+## 2. 从重复使用 Rollout 到 Importance Sampling
 
-### 2.1 Rollout 与训练不是完全同时发生
+这一节先回答一个具体问题：**为什么 PPO、GRPO 和 GSPO 都要比较 Current Policy 与 Old Policy 的概率？**
 
-设当前用于生成回答的旧策略为 $`\pi_{\theta_{\mathrm{old}}}`$，正在训练的新策略为 $`\pi_\theta`$。
+答案不是“因为公式里规定要有 Ratio”，而是训练系统先制造了一个分布错位：回答由旧策略生成，梯度更新时却希望评价新策略。
 
-对于输入 $`x`$，旧策略采样回答：
+### 2.1 Rollout 数据来自 Old Policy
+
+设当前用于生成回答的旧策略为 $`\pi_{\theta_{\mathrm{old}}}`$，正在训练的新策略为 $`\pi_\theta`$。对于输入 $`x`$，Rollout 阶段采样：
 
 ```math
 y\sim\pi_{\theta_{\mathrm{old}}}(\cdot\mid x)
 ```
 
-如果只执行一次极小更新，$`\pi_\theta`$ 与 $`\pi_{\theta_{\mathrm{old}}}`$ 很接近。但大规模训练通常会：
+如果生成一批回答后只执行一次极小更新，那么两者近似相同。但大规模 RL 通常会：
 
-- 一次生成很大的 Rollout Batch；
-- 将 Batch 切成多个 Mini-Batch；
-- 对同一批 Rollout 执行多个梯度更新。
+1. 使用旧策略生成一个很大的 Rollout Batch；
+2. 将 Rollout Batch 切成多个 Mini-Batch；
+3. 用这些 Mini-Batch 连续更新当前策略；
+4. 训练若干步以后，才重新同步权重并生成下一批 Rollout。
 
-随着更新进行，训练策略逐渐离开生成数据的旧策略，Batch 内部因此形成有限的 Off-Policy Mismatch。
+因此，同一批数据在第一次更新时比较新鲜，越到后面的 Mini-Batch 或 Epoch，当前策略 $`\pi_\theta`$ 与生成数据的 $`\pi_{\theta_{\mathrm{old}}}`$ 差异越大：
 
-### 2.2 Importance Sampling 的基本身份
+```text
+生成数据时：y ~ π_old
+想优化的却是：π_θ 下的期望
+```
 
-如果样本来自行为分布 $`p_{\mathrm{beh}}`$，但希望估计目标分布 $`p_{\mathrm{tar}}`$ 下的期望，可以写成：
+这就是 Ratio 出现前必须先看见的因果起点。
+
+### 2.2 不做校正时，算到的是哪个期望
+
+暂时把一条回答的训练信号记成 $`F(y)`$。它可以是 Reward、Advantage，或者一个与回答相关的代理目标。
+
+我们真正关心的是当前策略下的期望：
 
 ```math
-\mathbb{E}_{z\sim p_{\mathrm{tar}}}[f(z)]
+J(\theta)
 =
-\mathbb{E}_{z\sim p_{\mathrm{beh}}}
+\mathbb E_{y\sim\pi_\theta(\cdot\mid x)}[F(y)]
+```
+
+但是手里的回答来自旧策略。如果直接对 Rollout 求平均，估计的是：
+
+```math
+\mathbb E_{y\sim\pi_{\theta_{\mathrm{old}}}(\cdot\mid x)}[F(y)]
+```
+
+这两个期望一般不相等。原因不是 $`F(y)`$ 发生了变化，而是同一条回答在两个分布下被赋予的概率权重不同。
+
+例如，回答空间暂时只有 $`y_A`$ 和 $`y_B`$：
+
+| 回答 | $`\pi_{\mathrm{old}}`$ | $`\pi_\theta`$ | $`F(y)`$ |
+| --- | ---: | ---: | ---: |
+| $`y_A`$ | 0.8 | 0.5 | 1 |
+| $`y_B`$ | 0.2 | 0.5 | 3 |
+
+旧策略下的期望是：
+
+```math
+0.8\times1+0.2\times3=1.4
+```
+
+当前策略下的期望却是：
+
+```math
+0.5\times1+0.5\times3=2.0
+```
+
+如果继续把旧数据中的 $`y_A`$ 当成 0.8 权重、$`y_B`$ 当成 0.2 权重，就无法反映当前策略已经把更多概率放到 $`y_B`$ 上这一事实。
+
+### 2.3 Importance Sampling 怎样换测度
+
+对离散回答空间，当前策略下的期望可以写成求和：
+
+```math
+J(\theta)
+=
+\sum_y\pi_\theta(y\mid x)F(y)
+```
+
+在每一项中乘除旧策略概率：
+
+```math
+J(\theta)
+=
+\sum_y
+\pi_{\theta_{\mathrm{old}}}(y\mid x)
+\frac{\pi_\theta(y\mid x)}
+{\pi_{\theta_{\mathrm{old}}}(y\mid x)}
+F(y)
+```
+
+于是得到：
+
+```math
+J(\theta)
+=
+\mathbb E_{y\sim\pi_{\theta_{\mathrm{old}}}(\cdot\mid x)}
 \left[
-\frac{p_{\mathrm{tar}}(z)}{p_{\mathrm{beh}}(z)}f(z)
+\rho_\theta(y\mid x)F(y)
 \right]
 ```
 
 其中：
 
 ```math
-w(z)=\frac{p_{\mathrm{tar}}(z)}{p_{\mathrm{beh}}(z)}
+\rho_\theta(y\mid x)
+=
+\frac{\pi_\theta(y\mid x)}
+{\pi_{\theta_{\mathrm{old}}}(y\mid x)}
 ```
 
-称为 Importance Ratio。放到 Policy Optimization 中：
+就是 Importance Ratio。
 
-- 行为分布是生成 Rollout 的 $`\pi_{\theta_{\mathrm{old}}}`$；
-- 目标分布是正在更新的 $`\pi_\theta`$。
+这一步常被称为“换测度”。这里的“测度”不用想得过于抽象：在离散回答空间里，它就是**一个分布给每条回答分配多少概率质量**。$`\pi_{\theta_{\mathrm{old}}}`$ 和 $`\pi_\theta`$ 看的是同一批候选回答，但给它们的权重不同。
 
-### 2.3 为什么还要 Clipping
+因此，换测度并不是改变 $`F(y)`$，也不是重新生成回答，而是把“按照旧分布加权的平均”改写成“仍从旧分布采样、但额外乘一个校正权重的平均”。这个校正权重恰好是目标概率除以采样概率：
 
-如果新旧策略差异过大，Importance Ratio 可能极端放大某些样本，使训练不稳定。PPO 系方法用裁剪限制它：
+```text
+旧策略负责：哪些样本更常出现在数据里
+Ratio 负责：抵消旧策略的出现频率，再补上当前策略想要的权重
+```
+
+于是：
+
+- 如果当前策略比旧策略更容易生成 $`y`$，则 $`\rho_\theta(y\mid x)>1`$，这条样本应当增权；
+- 如果当前策略比旧策略更不容易生成 $`y`$，则 $`\rho_\theta(y\mid x)<1`$，这条样本应当降权；
+- 当两者相同，$`\rho_\theta(y\mid x)=1`$，旧样本不需要校正。
+
+回到上面的两回答例子：
 
 ```math
-\mathrm{clip}(w,1-\varepsilon,1+\varepsilon)
+\rho(y_A)=\frac{0.5}{0.8}=0.625
 ```
 
-Clipping 不是精确的概率分布约束，而是一个易计算的近端更新代理：当新策略相对旧策略变化过大时，截断继续扩大目标带来的收益。
+```math
+\rho(y_B)=\frac{0.5}{0.2}=2.5
+```
 
-## 3. 从序列概率开始
+用旧策略样本加权：
 
-### 3.1 自回归序列概率
+```math
+0.8\times0.625\times1
++
+0.2\times2.5\times3
+=2.0
+```
 
-回答 $`y=(y_1,y_2,\ldots,y_T)`$ 的序列概率是所有条件概率的乘积：
+正好恢复当前策略下的目标期望。
+
+实际训练看不到回答空间中所有可能的 $`y`$，只能拿到 $`N`$ 条 Rollout，因此用 Monte Carlo 平均近似上面的期望：
+
+```math
+\widehat J(\theta)
+=
+\frac{1}{N}
+\sum_{n=1}^{N}
+\rho_\theta(y^{(n)}\mid x)F(y^{(n)})
+```
+
+其中每个 $`y^{(n)}`$ 都由 $`\pi_{\theta_{\mathrm{old}}}`$ 采样。Importance Sampling 恒等式保证的是：在支持集等条件成立、Ratio 计算准确时，这个随机估计量对目标期望是无偏的；它不保证有限 $`N`$ 时每个 Batch 都接近真实期望。
+
+> [!important]
+> Importance Sampling 没有把旧样本“变成”新样本。它只是在求平均时重新分配样本权重，从而校正采样分布与目标分布之间的差异。
+
+### 2.4 Importance Sampling 成立需要什么条件
+
+上述变换隐含一个支持集条件：只要当前策略可能生成某个回答，旧策略也必须有机会采到它。否则会出现：
+
+```math
+\pi_\theta(y\mid x)>0
+```
+
+```math
+\pi_{\theta_{\mathrm{old}}}(y\mid x)=0
+```
+
+此时 Ratio 分母为 0，而旧数据中永远不会出现这条回答，无法仅靠重新加权恢复它的贡献。
+
+标准 Softmax 通常给词表中的 Token 非零概率，但实际 Rollout 还可能使用 Top-k、Top-p、屏蔽规则或约束解码。这时严格的行为分布应当包含这些 Sampling Transformation；如果训练只使用原始模型概率，Importance Ratio 已经带有近似。
+
+### 2.5 为什么无偏换测度仍可能不稳定
+
+Importance Sampling 的恒等式只说明期望正确，不保证有限样本估计稳定。如果某条回答在旧策略下很罕见、在当前策略下却很常见：
+
+```math
+\pi_{\theta_{\mathrm{old}}}(y\mid x)\ll\pi_\theta(y\mid x)
+```
+
+就会得到很大的 $`\rho_\theta(y\mid x)`$。少数罕见样本可能支配整个 Batch 的梯度，造成高方差和更新尖峰。
+
+PPO 系方法因此不直接信任任意大小的 Ratio，而是引入：
+
+```math
+\mathrm{clip}
+\left(
+\rho_\theta(y\mid x),
+1-\varepsilon_{\mathrm{low}},
+1+\varepsilon_{\mathrm{high}}
+\right)
+```
+
+这里需要看清一个取舍：
+
+- 不裁剪的 Importance Sampling 在条件满足时具有正确的换测度含义，但方差可能很大；
+- 裁剪限制极端权重、提高训练稳定性，却有意引入偏差；
+- PPO、GRPO、GSPO 优先追求可控的优化动力学，而不是构造完全无偏的离线估计器。
+
+### 2.6 Importance Sampling 公式没有决定优化粒度
+
+一般公式写成：
+
+```math
+\mathbb E_{z\sim p_{\mathrm{tar}}}[f(z)]
+=
+\mathbb E_{z\sim p_{\mathrm{beh}}}
+\left[
+\frac{p_{\mathrm{tar}}(z)}{p_{\mathrm{beh}}(z)}f(z)
+\right]
+```
+
+这里最容易被忽略的问题是：**随机变量 $`z`$ 到底是什么？**
+
+- 如果 $`f`$ 评价单个动作，$`z`$ 可以是一个动作；
+- 如果 $`f`$ 评价完整轨迹，$`z`$ 应当是完整轨迹；
+- 在 Outcome Reward 的 LLM RL 中，Verifier 通常评价整条回答，因此自然的随机变量是完整回答 $`y`$。
+
+这正是下一节必须引入序列概率的原因。Importance Sampling 告诉我们需要：
+
+```math
+\frac{\pi_\theta(y\mid x)}
+{\pi_{\theta_{\mathrm{old}}}(y\mid x)}
+```
+
+但语言模型并不会一次直接输出这个序列概率；它只在每个位置输出 Next-Token 条件概率。接下来要做的不是突然换话题，而是把上式中的 $`\pi_\theta(y\mid x)`$ 展开成模型实际能够计算的量。
+
+## 3. 从完整回答到自回归序列概率
+
+上一节已经确定：对于整条回答获得一个 Reward 的任务，换测度所需的对象是完整回答概率 $`\pi_\theta(y\mid x)`$。本节沿着模型的生成过程，把这个量逐步拆成 Token Log Probability。
+
+### 3.1 一次 Rollout 是序列空间中的一个样本
+
+固定 Prompt $`x`$ 后，语言模型的样本空间不是“词表里的一个 Token”，而是所有可能的完整回答：
+
+```math
+y=(y_1,y_2,\ldots,y_T)
+```
+
+$`T`$ 可以由 EOS 决定，也可以受到最大生成长度限制。不同回答可能具有不同长度。
+
+如果回答以 EOS 正常结束，EOS 也应视为这条生成路径的一部分；遗漏 EOS 概率，相当于计算“生成此前缀”的概率，而不是“恰好在这里结束的完整回答”的概率。实际实现是否显式把 EOS 放进 Response Mask，需要与框架的 Logprob 定义保持一致。
+
+自回归生成可以想象成在一棵生成树上行走：
+
+```text
+Prompt x
+  ├─ y₁=A
+  │    ├─ y₂=C
+  │    └─ y₂=EOS
+  └─ y₁=B
+       ├─ y₂=D
+       └─ y₂=EOS
+```
+
+每个节点的分支概率由当前前缀下的 Next-Token Distribution 给出。一条完整回答就是从根节点走到 EOS 的一条路径。
+
+因此必须区分两个层次：
+
+| 层次 | 随机对象 | 概率含义 |
+| --- | --- | --- |
+| Token 级 | 给定前缀后的下一 Token $`y_t`$ | 一条边的条件概率 |
+| 序列级 | 完整回答 $`y_{1:T}`$ | 一整条路径的联合概率 |
+
+Outcome Verifier 为整条路径给出 $`r(x,y)`$。所以从 Importance Sampling 的角度，一次 Rollout 是序列空间中的一个样本，而不是 $`T`$ 个彼此独立的 Token 样本。
+
+### 3.2 为什么序列概率是条件概率的连乘
+
+考虑两 Token 回答 $`y=(y_1,y_2)`$。概率链式法则给出：
+
+```math
+\pi_\theta(y_1,y_2\mid x)
+=
+\pi_\theta(y_1\mid x)
+\pi_\theta(y_2\mid x,y_1)
+```
+
+扩展到 $`T`$ 个 Token：
 
 ```math
 \pi_\theta(y\mid x)
@@ -136,73 +365,197 @@ Clipping 不是精确的概率分布约束，而是一个易计算的近端更�
 \pi_\theta(y_t\mid x,y_{1:t-1})
 ```
 
-为了避免小概率连乘造成数值下溢，实际计算使用 Log Probability：
+这个乘积不是在假设 Token 相互独立。恰恰相反，每一项都显式依赖此前生成的全部 Token：
+
+```math
+s_t=(x,y_{1:t-1})
+```
+
+使用状态记号，可以简写为：
+
+```math
+\pi_\theta(y\mid x)
+=
+\prod_{t=1}^{T}\pi_\theta(y_t\mid s_t)
+```
+
+一个简单例子：
+
+- 模型在 Prompt 后生成 `A` 的概率是 0.6；
+- 在已经生成 `A` 后生成 `EOS` 的概率是 0.2。
+
+那么完整回答 `(A, EOS)` 的概率是：
+
+```math
+0.6\times0.2=0.12
+```
+
+这就是“路径概率等于沿途边概率之积”。
+
+由于许多小概率直接相乘会数值下溢，工程实现转到 Log 空间：
 
 ```math
 \log\pi_\theta(y\mid x)
 =
 \sum_{t=1}^{T}
-\log\pi_\theta(y_t\mid x,y_{1:t-1})
+\log\pi_\theta(y_t\mid s_t)
 ```
 
-### 3.2 Token 级 Ratio
+所以训练系统保存的 `(batch_size, response_length)` Token Logprob，经过 Mask 后按序列求和，就能恢复每条回答的 Sequence Logprob。
 
-在第 $`t`$ 个位置，GRPO 使用：
+### 3.3 为什么序列 Ratio 是 Token Ratio 的连乘
+
+上一节需要的新旧策略序列概率比是：
 
 ```math
-w_{i,t}(\theta)
+\rho_\theta(y\mid x)
+=
+\frac{\pi_\theta(y\mid x)}
+{\pi_{\theta_{\mathrm{old}}}(y\mid x)}
+```
+
+分别展开分子和分母：
+
+```math
+\rho_\theta(y\mid x)
 =
 \frac{
-\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
+\prod_{t=1}^{T}\pi_\theta(y_t\mid s_t)
 }{
-\pi_{\theta_{\mathrm{old}}}(y_{i,t}\mid x,y_{i,1:t-1})
+\prod_{t=1}^{T}\pi_{\theta_{\mathrm{old}}}(y_t\mid s_t)
 }
 ```
 
-对应的 Log-Ratio 是：
+同一位置的分子、分母配对：
 
 ```math
-\delta_{i,t}
+\rho_\theta(y\mid x)
 =
-\log\pi_\theta(y_{i,t}\mid x,y_{i,1:t-1})
+\prod_{t=1}^{T}
+\frac{
+\pi_\theta(y_t\mid s_t)
+}{
+\pi_{\theta_{\mathrm{old}}}(y_t\mid s_t)
+}
+```
+
+定义 Token Ratio：
+
+```math
+w_t(\theta)
+=
+\frac{
+\pi_\theta(y_t\mid s_t)
+}{
+\pi_{\theta_{\mathrm{old}}}(y_t\mid s_t)
+}
+```
+
+分子和分母必须在**同一条旧策略实际采到的路径、同一个前缀 $`s_t`$、同一个已采样 Token $`y_t`$** 上计算。Current Policy 不需要重新采样另一条回答；它只需要对旧回答做一次 Teacher Forcing，给出这条既定路径上每个 Token 的 Logprob。
+
+就得到：
+
+```math
+\rho_\theta(y\mid x)
+=
+\prod_{t=1}^{T}w_t(\theta)
+```
+
+继续使用两 Token 回答 `(A, EOS)`。假设旧策略给出的两个条件概率分别为 0.6 和 0.2，而当前策略在同一前缀上给出 0.5 和 0.4，那么：
+
+```math
+\pi_{\mathrm{old}}(A,\mathrm{EOS}\mid x)
+=
+0.6\times0.2=0.12
+```
+
+```math
+\pi_\theta(A,\mathrm{EOS}\mid x)
+=
+0.5\times0.4=0.20
+```
+
+序列 Ratio 直接计算为：
+
+```math
+\rho
+=
+\frac{0.20}{0.12}
+\approx1.667
+```
+
+两个 Token Ratio 分别为 $`0.5/0.6\approx0.833`$ 和 $`0.4/0.2=2`$，连乘后仍然得到：
+
+```math
+0.833\times2\approx1.667
+```
+
+这不是 GSPO 额外规定的公式，而是“联合概率的比值”在自回归分解下必然得到的结果。
+
+对应的 Token Log-Ratio 为：
+
+```math
+\delta_t
+=
+\log\pi_\theta(y_t\mid s_t)
 -
-\log\pi_{\theta_{\mathrm{old}}}(y_{i,t}\mid x,y_{i,1:t-1})
+\log\pi_{\theta_{\mathrm{old}}}(y_t\mid s_t)
 ```
 
-因此：
+在 Log 空间中，序列 Ratio 的连乘变成求和：
 
 ```math
-w_{i,t}(\theta)=\exp(\delta_{i,t})
-```
-
-### 3.3 原始序列级 Ratio
-
-如果把完整回答视为 Importance Sampling 的随机变量，序列级概率比是：
-
-```math
-\rho_i(\theta)
+\log\rho_\theta(y\mid x)
 =
-\frac{\pi_\theta(y_i\mid x)}
-{\pi_{\theta_{\mathrm{old}}}(y_i\mid x)}
+\sum_{t=1}^{T}\delta_t
 ```
 
-将自回归概率展开：
+至此，前两节的链条闭合：
+
+```text
+目标：当前策略下的序列 Reward 期望
+  ↓ 旧策略生成了训练样本，需要换测度
+完整回答 Importance Ratio ρ(y)
+  ↓ 自回归概率链式法则
+所有 Token Ratio 的连乘
+  ↓ 转到 Log 空间
+所有 Token Log-Ratio 的求和
+```
+
+但这里又产生一个新的问题：原始序列 Ratio 会随长度迅速爆炸或消失。
+
+假设每个 Token Ratio 都只有很小偏移：
 
 ```math
-\rho_i(\theta)
-=
-\prod_{t=1}^{T_i}w_{i,t}(\theta)
+w_t=1.001
 ```
 
-在 Log 空间中：
+当 $`T=4000`$ 时：
 
 ```math
-\log\rho_i(\theta)
-=
-\sum_{t=1}^{T_i}\delta_{i,t}
+\rho=(1.001)^{4000}\approx54.5
 ```
 
-这才是严格意义上的完整序列概率比，但它不适合直接用于长序列训练：几十、几千个略大于或略小于 1 的 Token Ratio 连乘后，可能迅速爆炸或趋近 0；不同长度回答的数值尺度也不一致。
+反过来，如果：
+
+```math
+w_t=0.999
+```
+
+则：
+
+```math
+\rho=(0.999)^{4000}\approx0.0183
+```
+
+单 Token 只有千分之一的平均变化，完整序列 Ratio 却横跨几个数量级。回答长度不同，Ratio 的典型尺度也不同。
+
+这解释了后续两个设计选择为什么会出现：
+
+1. GRPO 避开完整连乘，直接在 Token 级使用 $`w_t`$；
+2. GSPO 从序列 Ratio 出发，但对 Log-Ratio 按长度求平均，也就是对 $`\rho`$ 取 $`T`$ 次方根。
+
+第 4 节先补上 Group-Relative Advantage；第 5 节分析 Token 级做法的问题；第 6 节再正式推导 GSPO 的长度归一化序列 Ratio。
 
 ## 4. GRPO 的基础目标
 
@@ -215,6 +568,8 @@ w_{i,t}(\theta)=\exp(\delta_{i,t})
 \sim
 \pi_{\theta_{\mathrm{old}}}(\cdot\mid x)
 ```
+
+第 3 节只讨论一条回答，所以使用了 $`y`$、$`\rho_\theta`$ 和 $`w_t`$。现在组内有 $`G`$ 条回答，为每条回答加上下标 $`i`$ 后，相应记号变成 $`y_i`$、$`\rho_i`$ 和 $`w_{i,t}`$；概率含义没有变化。
 
 验证器给出序列级 Reward：
 
@@ -308,6 +663,14 @@ w_{i,t}(\theta)
 但序列级 Reward 只告诉模型“整条回答相对更好或更差”，并没有提供哪个 Token 应该承担更多 Credit 的信息。单纯依靠 Token Ratio 形成不同权重，不等于获得了可靠的 Token-Level Credit Assignment。
 
 ## 6. GSPO 的序列级 Importance Ratio
+
+现在可以把前面的矛盾合在一起：
+
+- 第 2、3 节说明，序列 Reward 对应的严格换测度权重是完整序列 Ratio $`\rho_i=\prod_t w_{i,t}`$；
+- 第 3.3 节说明，这个连乘会让 Ratio 的尺度随长度指数变化；
+- 第 5 节说明，完全退回 Token 级 $`w_{i,t}`$ 又会让同一个序列 Advantage 在 Token 间接受不同权重和不同裁剪决定。
+
+GSPO 的选择是保留“同一条回答只使用一个 Ratio”的序列粒度，同时消除原始连乘对长度的指数敏感性。实现这一折中的操作，就是对序列 Log-Ratio 按有效 Token 数取平均。
 
 ### 6.1 长度归一化
 
