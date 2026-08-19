@@ -360,18 +360,43 @@ v_i=\sum_{j=1}^{N_e}G_{i,j}e_{i,j}(s_i)
 
 直接套用固定 Top-k MoE 在 RankMixer 中效果不好：
 
-1. **所有 token 被分配相同的 expert 数。** 高信息 token 可能容量不足，低信息 token 又浪费计算预算。
+1. **所有 token 被分配相同的 expert 数。** Top-k 的 $`k`$ 是人为设定的硬预算。无论一个 token 承载了用户长期兴趣、候选内容等复杂信息，还是只承载简单上下文，它都必须计算恰好 $`k`$ 个 expert。高信息 token 可能容量不足，低信息 token 又浪费计算预算。
 2. **专家数量爆炸且训练不均衡。** 原本每个 token 就有独立参数，再为每个 token 增加多个 expert，部分 expert 可能长期得不到梯度，形成 dying experts。
+
+例如，假设 $`T=16`$、每个 token 有 $`N_e=8`$ 个专属 expert，固定 Top-2 会让每个样本永远执行 $`16\times2=32`$ 次 expert FFN。它无法把某个简单 token 节省下来的计算，转移给更需要容量的 token。
+
+> [!IMPORTANT]
+> 这里的 expert 仍然是 **per-token expert**：第 $`i`$ 个 token 使用自己的 $`e_{i,1},\ldots,e_{i,N_e}`$，并不与其他 token 共用同一组 expert。MoE 改变的是“一个 token 在自己的 expert bank 中调用几个、调用哪些”，不是取消 Per-token FFN 的参数隔离。
 
 ### 6.3 ReLU Routing：让激活数量随 token 动态变化
 
-论文不用固定 Top-k，而是对 router 输出应用 ReLU：
+论文不用固定 Top-k + Softmax，而是先让 router 为第 $`i`$ 个 token 输出 $`N_e`$ 个实数 logit：
 
 ```math
-G_{i,j}=\mathrm{ReLU}\left(h(s_i)_j\right)
+z_i=h(s_i)\in\mathbb{R}^{N_e}
 ```
 
-负值直接变成 0，正值 expert 被激活。不同 token 可以自然得到不同的非零 gate 数量：信息更丰富的 token 可以激活更多 expert，简单 token 则激活更少。
+再逐元素应用 ReLU：
+
+```math
+G_{i,j}=\mathrm{ReLU}(z_{i,j})=\max(0,z_{i,j})
+```
+
+由此定义第 $`i`$ 个 token 的激活集合：
+
+```math
+\mathcal A_i=\{j\mid G_{i,j}>0\},\qquad k_i=|\mathcal A_i|
+```
+
+负 logit 被截断为 0，对应 expert 不执行；正 logit 对应的 expert 被激活。输出是所有已激活 expert 结果的加权和：
+
+```math
+v_i=\sum_{j\in\mathcal A_i}G_{i,j}e_{i,j}(s_i)
+```
+
+这里没有固定的 $`k`$，所以 $`k_i`$ 可以随样本和 token 改变。ReLU gate 也不像 Softmax 那样被归一化到和为 1：gate 是否为正决定稀疏结构，正值大小同时决定该 expert 对输出的贡献强度。
+
+从优化角度看，并不是系统预先知道哪个 token“信息量高”。Router 在任务损失的梯度下学习哪些 expert 有用；论文观察并解释为：复杂、高信息 token 往往保留更多正 gate，简单 token 往往只有少量正 gate，从而得到不同的计算容量。
 
 为了控制平均稀疏度，训练目标加入 $`\ell_1`$ 正则：
 
@@ -383,17 +408,72 @@ G_{i,j}=\mathrm{ReLU}\left(h(s_i)_j\right)
 \mathcal{L}_{\mathrm{reg}}=\sum_{i=1}^{N_t}\sum_{j=1}^{N_e}G_{i,j}
 ```
 
-系数 $`\lambda`$ 会围绕目标激活预算进行调节，从而在效果与成本之间建立显式约束。
+因为所有 gate 都是非负数，减小 $`\mathcal L_{\mathrm{reg}}`$ 会把较弱的正 gate 推向 0，直接减少激活 expert。系数 $`\lambda`$ 会围绕目标平均激活比例自适应调节，从而约束**全体 token 的平均预算**，而不是强制每个 token 使用相同预算。
 
-### 6.4 DTSI-MoE：训练稠密，推理稀疏
+若第 $`i`$ 个 token 激活 $`k_i`$ 个 expert，忽略较小的 router 成本，单样本 expert 计算量近似为：
+
+```math
+C_{\mathrm{expert}}\approx C_{\mathrm{FFN}}\sum_{i=1}^{N_t}k_i
+```
+
+平均激活比例为：
+
+```math
+\rho=\frac{\sum_{i=1}^{N_t}k_i}{N_tN_e}
+```
+
+模型仍保存全部 $`N_tN_e`$ 组 expert 参数，但稀疏推理只执行 gate 为正的 FFN，因此 expert 计算量大约是全激活版本的 $`\rho`$。
+
+### 6.4 一个具体的动态路由例子
+
+假设一个简化 RankMixer 只有 3 个混合 token，每个 token 有 4 个专属 expert。三个 router 的原始输出分别是：
+
+```text
+用户兴趣 token： [ 1.2,  0.7, -0.4,  0.2]
+候选内容 token： [ 0.9, -0.3,  1.1, -0.2]
+简单场景 token： [-0.1,  0.4, -0.2, -0.6]
+```
+
+经过 ReLU 后：
+
+```text
+用户兴趣 token： [1.2, 0.7, 0.0, 0.2] → 激活 3 个 expert
+候选内容 token： [0.9, 0.0, 1.1, 0.0] → 激活 2 个 expert
+简单场景 token： [0.0, 0.4, 0.0, 0.0] → 激活 1 个 expert
+```
+
+三个 token 总共执行 6 次 expert FFN，平均仍是每个 token 2 个，与固定 Top-2 的总预算相同；区别是预算被动态重分配成 $`3+2+1`$，而不是僵硬的 $`2+2+2`$。
+
+再具体看候选内容 token。假设两个已激活 expert 输出二维向量：
+
+```text
+e₂,₁(s₂) = [ 1.0, 2.0]，gate = 0.9
+e₂,₃(s₂) = [-1.0, 1.0]，gate = 1.1
+```
+
+则 MoE 输出为：
+
+```math
+v_2=0.9[1.0,2.0]+1.1[-1.0,1.0]=[-0.2,2.9]
+```
+
+其余两个 gate 为 0，对应 expert 无须前向计算。随后与 Dense PFFN 相同，$`v_2`$ 进入 FFN 子层的残差与 LayerNorm；所有 $`T`$ 个 token 得到新表示后，再一起进入下一层 RankMixer Block。
+
+> [!NOTE]
+> 上述数值仅用于解释计算过程。论文没有规定“用户 token 必须激活 3 个 expert”；真实激活集合完全由训练后的 router 和当前样本决定。
+
+### 6.5 DTSI-MoE：训练稠密，推理稀疏
 
 DTSI 表示 **Dense-Training / Sparse-Inference**。其核心是训练和推理使用两个 router：
 
-- $`h_{\mathrm{train}}`$ 用于训练期，让更多专家获得充分梯度更新；
-- $`h_{\mathrm{infer}}`$ 学习满足推理稀疏预算的路由，并承受稀疏正则；
+- $`h_{\mathrm{train}}`$ 用于训练期的稠密覆盖，让更多 expert 获得充分梯度更新，缓解 expert starvation；
+- $`h_{\mathrm{infer}}`$ 同样在训练期学习，但只有它承担 $`\mathcal L_{\mathrm{reg}}`$，因而学习满足推理稀疏预算的动态路由；
 - 两个 router 都在训练期更新，线上只保留 $`h_{\mathrm{infer}}`$。
 
 这把两个冲突目标拆开：训练时优先避免专家饿死，推理时优先减少激活成本。
+
+> [!CAUTION]
+> 论文明确披露了“双 router、只对 inference router 加稀疏正则、推理只用 inference router”，但没有给出比这更细的双路输出融合公式。因此理解 DTSI 时应抓住训练覆盖与推理预算的解耦，不要自行假设两个 router 的 logits 采用某种未披露的加和方式。
 
 ```mermaid
 flowchart LR
