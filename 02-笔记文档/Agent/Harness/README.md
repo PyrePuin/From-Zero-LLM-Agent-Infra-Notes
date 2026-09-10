@@ -37,7 +37,6 @@ Agent/Harness/
 - **Phase 5 多智能体**：怎么让多个 Agent 协作
 - **Phase 6 扩展与组装**：怎么接入外部世界（MCP / skill / 生态）
 
-状态：✅ done。
 
 ### [Claw-Theory/](Claw-Theory/) —— 服务：产品级常驻 Agent 的解剖
 
