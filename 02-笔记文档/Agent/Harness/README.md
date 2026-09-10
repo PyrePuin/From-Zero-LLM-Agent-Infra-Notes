@@ -7,7 +7,7 @@
 ## 推荐课程
 
 > [!TIP]
-> **目前最推荐的 Harness 工程课程：[learn-harness-engineering](https://github.com/PyrePuin/learn-harness-engineering)（fork 自 [walkinglabs/learn-harness-engineering](https://github.com/walkinglabs/learn-harness-engineering)）**
+> **目前推荐的 Harness 工程课程：[learn-harness-engineering](https://github.com/PyrePuin/learn-harness-engineering)（fork 自 [walkinglabs/learn-harness-engineering](https://github.com/walkinglabs/learn-harness-engineering)）**，整体内容简洁，讲解了现代harness的思想、机制，适合从整体思路上首先了解harness，并附带了一个动手实践的课程。
 >
 > 一个 project-based 的 Harness 工程教程：从 0 到 1 构建让 AI coding agent 可靠工作的环境、状态管理、验证与控制机制（14 讲 + 8 个项目 + 模板资源库，MIT License，15 种语言）。
 >
@@ -15,7 +15,7 @@
 > - 原仓库：[walkinglabs/learn-harness-engineering](https://github.com/walkinglabs/learn-harness-engineering)
 > - 中文讲义（文档网站）：[learn-harness-engineering 中文文档](https://walkinglabs.github.io/learn-harness-engineering/zh/)
 >
-> 核心观点与本仓库一致：**最强的模型，没有合适的 Harness 依然会在真实工程任务上失败**。课程给出五子系统框架（instructions / state / verification / scope / lifecycle），并拆解了 Pi、Claude Code、Codex、DeepSeek 四个前沿产品的 Harness 设计。这门课的内容十分实用，可以作为一个总览。本仓库的剩余笔记，也是基于 learn-claude-code、learn-openclaw、pi-mono 等学习过程中的总结笔记。
+> 核心观点与本仓库一致：**最强的模型，没有合适的 Harness 依然会在真实工程任务上失败**。课程给出五子系统框架（instructions / state / verification / scope / lifecycle），并拆解了 Pi、Claude Code、Codex、DeepSeek 四个前沿产品的 Harness 设计。这门课的内容十分实用，可以作为一个总览。本仓库的剩余笔记，也是基于 learn-claude-code、learn-openclaw、pi-mono 等学习过程中的总结笔记，可以看作是对harness机制更加详细的讲解，会深入到agentloop内部讲解机制。
 
 ## 子目录一览
 
